@@ -1,0 +1,7 @@
+.state/
+.k8s-recommendation-engine/
+/k8s-recommendation-engine
+configs/*profile*.yaml
+deploy/*/*profile*.yaml
+docs/research/
+.idea/

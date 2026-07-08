@@ -1,0 +1,8 @@
+.git
+.idea
+.state
+k8s-recommendation-engine
+tmp
+*.db
+*.db-shm
+*.db-wal

@@ -42,7 +42,7 @@ spec:
             - summary
           env:
             - name: PROMETHEUS_URL
-              value: http://prometheus-operated.monitoring.svc:9090
+              value: http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090
             - name: HISTORY_WINDOW
               value: 6h
             - name: HISTORY_STEP

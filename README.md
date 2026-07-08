@@ -135,3 +135,37 @@ go run ./cmd/k8s-recommendation-engine analyze --output json
 - `shipyardhq/shipyardhq-worker`
 
 The controller internals are generic: Shipyard is represented by configuration, not hardcoded control flow.
+
+## Run In Cluster
+
+Build and push the controller image:
+
+```bash
+docker build -t ghcr.io/abhi1693/k8s-recommendation-engine:latest .
+docker push ghcr.io/abhi1693/k8s-recommendation-engine:latest
+```
+
+Create the private Shipyard profile ConfigMap out of band. Profiles are intentionally not committed to this repository:
+
+```bash
+kubectl create namespace k8s-recommendation-engine --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n k8s-recommendation-engine create configmap k8s-recommendation-engine-profile \
+  --from-file=shipyard-profile.yaml=configs/shipyard-profile.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Deploy the read-only controller:
+
+```bash
+kubectl apply -k deploy/shipyard-readonly
+```
+
+Watch it:
+
+```bash
+kubectl -n k8s-recommendation-engine rollout status deploy/k8s-recommendation-engine
+kubectl -n k8s-recommendation-engine logs -f deploy/k8s-recommendation-engine
+```
+
+The checked-in deployment runs in dry-run controller mode and writes learning state to the PVC at `/var/lib/k8s-recommendation-engine/k8s-recommendation-engine.db`. It reads Prometheus from `http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090`.

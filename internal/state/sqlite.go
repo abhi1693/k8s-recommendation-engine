@@ -124,6 +124,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			confidence REAL NOT NULL,
 			blocked INTEGER NOT NULL,
 			recommendation_mode TEXT NOT NULL DEFAULT '',
+			recommendation_actionable INTEGER NOT NULL DEFAULT 0,
 			reason_codes_json TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_workload_runs_lookup
@@ -198,6 +199,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if err := s.ensureColumn(ctx, "workload_runs", "recommendation_mode", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "workload_runs", "recommendation_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
@@ -322,6 +326,7 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 				recommended_memory_request,
 				confidence,
 				recommendation_mode,
+				recommendation_actionable,
 				reason_codes_json
 			FROM workload_runs
 		WHERE application = ? AND namespace = ? AND workload_name = ?
@@ -341,6 +346,7 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 		&previous.RecommendedMemoryRequest,
 		&previous.Confidence,
 		&previous.Mode,
+		&previous.Actionable,
 		&reasonCodesJSON,
 	)
 	if err == nil {
@@ -374,6 +380,7 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 				recommended_memory_request,
 				confidence,
 				recommendation_mode,
+				recommendation_actionable,
 				reason_codes_json
 			FROM workload_runs
 		WHERE application = ? AND namespace = ? AND workload_name = ?
@@ -399,6 +406,7 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 			&run.RecommendedMemoryRequest,
 			&run.Confidence,
 			&run.Mode,
+			&run.Actionable,
 			&reasonCodesJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan recent persisted run: %w", err)
@@ -418,6 +426,7 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 type priorRun struct {
 	GeneratedAt              *time.Time
 	Mode                     string
+	Actionable               bool
 	CurrentReplicas          int32
 	RecommendedReplicas      int32
 	CurrentCPURequest        string
@@ -799,6 +808,12 @@ func classifyOutcome(previous priorRun, current *analyzer.WorkloadReport) *analy
 		CurrentReplicas:                  current.Recommendation.CurrentReplicas,
 		CurrentCPURequest:                current.Recommendation.CurrentCPURequest,
 		CurrentMemoryRequest:             current.Recommendation.CurrentMemoryRequest,
+	}
+
+	if !previous.Actionable {
+		outcome.Status = "no_action_taken"
+		outcome.Details = append(outcome.Details, "previous recommendation was blocked or not actionable")
+		return outcome
 	}
 
 	replicasChanged := previous.CurrentReplicas != previous.RecommendedReplicas
@@ -1210,8 +1225,9 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 				confidence,
 				blocked,
 				recommendation_mode,
+				recommendation_actionable,
 				reason_codes_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		application,
 		workload.Namespace,
@@ -1227,6 +1243,7 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 		workload.Recommendation.Confidence,
 		boolInt(workload.Recommendation.Blocked),
 		workload.Recommendation.Mode,
+		boolInt(recommendationActionable(workload.Recommendation)),
 		string(reasons),
 	)
 	if err != nil {
@@ -1322,6 +1339,10 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func recommendationActionable(recommendation analyzer.Recommendation) bool {
+	return recommendation.Stability != nil && recommendation.Stability.Actionable
 }
 
 func sqlFinite(value float64) float64 {

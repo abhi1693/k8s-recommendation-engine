@@ -47,8 +47,8 @@ func TestAttachAndRecordPersistsPriorLearning(t *testing.T) {
 	if persistent.LastOutcome == nil {
 		t.Fatal("second last outcome is nil")
 	}
-	if persistent.LastOutcome.Status != "dry_run_not_applied" {
-		t.Fatalf("LastOutcome.Status = %q, want dry_run_not_applied", persistent.LastOutcome.Status)
+	if persistent.LastOutcome.Status != "no_action_taken" {
+		t.Fatalf("LastOutcome.Status = %q, want no_action_taken", persistent.LastOutcome.Status)
 	}
 }
 
@@ -56,12 +56,14 @@ func TestAttachAndRecordClassifiesProposeNotApplied(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := testReport()
 	first.Workloads[0].Recommendation.Mode = "propose"
+	first.Workloads[0].Recommendation.RecommendedCPURequest = "800m"
 	if err := AttachAndRecord(context.Background(), path, first); err != nil {
 		t.Fatal(err)
 	}
 
 	second := testReport()
 	second.Workloads[0].Recommendation.Mode = "propose"
+	second.Workloads[0].Recommendation.RecommendedCPURequest = "800m"
 	if err := AttachAndRecord(context.Background(), path, second); err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +99,8 @@ func TestAttachAndRecordDoesNotBlockProposeAfterDryRunHistory(t *testing.T) {
 		t.Fatalf("CPU gate should not be blocked by dry-run history after switching to propose: %#v", stability.CPU)
 	}
 	if second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome == nil ||
-		second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome.Status != "dry_run_not_applied" {
-		t.Fatalf("last outcome = %#v, want dry_run_not_applied", second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome)
+		second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome.Status != "no_action_taken" {
+		t.Fatalf("last outcome = %#v, want no_action_taken", second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome)
 	}
 }
 
@@ -173,6 +175,7 @@ func TestClassifyOutcomeAppliedSuccessful(t *testing.T) {
 	workload.MetricsCondition = "healthy"
 
 	outcome := classifyOutcome(priorRun{
+		Actionable:               true,
 		CurrentReplicas:          2,
 		RecommendedReplicas:      2,
 		CurrentCPURequest:        "700m",
@@ -196,6 +199,7 @@ func TestClassifyOutcomeTooAggressive(t *testing.T) {
 	workload.MetricsCondition = "healthy"
 
 	outcome := classifyOutcome(priorRun{
+		Actionable:               true,
 		CurrentReplicas:          2,
 		RecommendedReplicas:      2,
 		CurrentCPURequest:        "700m",

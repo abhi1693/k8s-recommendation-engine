@@ -204,6 +204,103 @@ spec: {}
 	}
 }
 
+func TestCreateProposalCommitBlocksWhenRemoteAdvanced(t *testing.T) {
+	worktree := initProposalGitRepo(t)
+	remote := initBareGitRepo(t)
+	gitTest(t, worktree, "remote", "add", "origin", remote)
+	writeRepoFile(t, worktree, "app.yaml", `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipyardhq
+  namespace: shipyardhq
+spec: {}
+`)
+	gitTest(t, worktree, "add", ".")
+	gitTest(t, worktree, "commit", "-m", "initial")
+	gitTest(t, worktree, "push", "-u", "origin", "master")
+
+	other := cloneGitRepo(t, remote)
+	gitTest(t, other, "config", "user.name", "K8s Recommendation Engine Test")
+	gitTest(t, other, "config", "user.email", "k8s-recommendation-engine@example.invalid")
+	writeRepoFile(t, other, "other.yaml", "remote: advanced\n")
+	gitTest(t, other, "add", ".")
+	gitTest(t, other, "commit", "-m", "remote update")
+	gitTest(t, other, "push")
+
+	proposal := CreateProposal(context.Background(), worktree, proposalReplicasReport(), ProposalOptions{
+		Kind:                   "commit",
+		BranchName:             "master",
+		DefaultBranch:          "master",
+		Remote:                 "origin",
+		Push:                   true,
+		AllowDefaultBranchPush: true,
+	})
+	if !proposal.Blocked {
+		t.Fatalf("proposal should block stale local branch: %#v", proposal)
+	}
+	if len(proposal.BlockReasons) != 1 || !strings.Contains(proposal.BlockReasons[0], "behind origin/master") {
+		t.Fatalf("BlockReasons = %#v, want behind origin/master", proposal.BlockReasons)
+	}
+	if proposal.Commit != "" || proposal.Pushed {
+		t.Fatalf("blocked stale proposal should not commit or push: %#v", proposal)
+	}
+	content, err := os.ReadFile(filepath.Join(worktree, "app.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "replicas: 2") {
+		t.Fatalf("blocked stale proposal wrote manifest:\n%s", string(content))
+	}
+}
+
+func TestCreateProposalCommitBlocksWhenBranchAlreadyAhead(t *testing.T) {
+	worktree := initProposalGitRepo(t)
+	remote := initBareGitRepo(t)
+	gitTest(t, worktree, "remote", "add", "origin", remote)
+	writeRepoFile(t, worktree, "app.yaml", `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipyardhq
+  namespace: shipyardhq
+spec: {}
+`)
+	gitTest(t, worktree, "add", ".")
+	gitTest(t, worktree, "commit", "-m", "initial")
+	gitTest(t, worktree, "push", "-u", "origin", "master")
+	writeRepoFile(t, worktree, "local.yaml", "local: proposal\n")
+	gitTest(t, worktree, "add", ".")
+	gitTest(t, worktree, "commit", "-m", "k8s-recommendation-engine: propose existing local change")
+	beforeHead := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+
+	proposal := CreateProposal(context.Background(), worktree, proposalReplicasReport(), ProposalOptions{
+		Kind:                   "commit",
+		BranchName:             "master",
+		DefaultBranch:          "master",
+		Remote:                 "origin",
+		Push:                   true,
+		AllowDefaultBranchPush: true,
+	})
+	if !proposal.Blocked {
+		t.Fatalf("proposal should block additional local proposal commit: %#v", proposal)
+	}
+	if len(proposal.BlockReasons) != 1 || !strings.Contains(proposal.BlockReasons[0], "already has 1 unpushed commit") {
+		t.Fatalf("BlockReasons = %#v, want unpushed commit block", proposal.BlockReasons)
+	}
+	afterHead := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+	if afterHead != beforeHead {
+		t.Fatalf("HEAD changed from %s to %s", beforeHead, afterHead)
+	}
+	content, err := os.ReadFile(filepath.Join(worktree, "app.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "replicas: 2") {
+		t.Fatalf("blocked ahead proposal wrote manifest:\n%s", string(content))
+	}
+}
+
 func TestCreateProposalPushesExistingProposalCommitWhenNoNewChanges(t *testing.T) {
 	worktree := initProposalGitRepo(t)
 	remote := initBareGitRepo(t)
@@ -680,6 +777,17 @@ func initBareGitRepo(t *testing.T) string {
 		t.Fatalf("git init --bare failed: %v\n%s", err, string(output))
 	}
 	return remote
+}
+
+func cloneGitRepo(t *testing.T, remote string) string {
+	t.Helper()
+	worktree := t.TempDir()
+	command := exec.Command("git", "clone", remote, worktree)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git clone failed: %v\n%s", err, string(output))
+	}
+	return worktree
 }
 
 func proposalReplicasReport() *Report {

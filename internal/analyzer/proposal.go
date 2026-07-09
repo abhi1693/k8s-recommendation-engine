@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -238,6 +239,13 @@ func writeProposalCommit(ctx context.Context, worktree string, report *Report, p
 		proposal.BlockReasons = append(proposal.BlockReasons, reason)
 		return
 	}
+	syncBranch := branch
+	if !branchExists {
+		syncBranch = currentBranch
+	}
+	if !ensureProposalRemoteFresh(ctx, worktree, proposal, options, syncBranch, false) {
+		return
+	}
 	if currentBranch != branch {
 		if branchExists {
 			if _, err := gitOutput(ctx, worktree, "switch", branch); err != nil {
@@ -321,6 +329,9 @@ func publishExistingProposalCommit(ctx context.Context, worktree string, proposa
 	if reason := proposalPushBlockReason(branch, defaultBranch, options); reason != "" {
 		proposal.Blocked = true
 		proposal.BlockReasons = append(proposal.BlockReasons, reason)
+		return
+	}
+	if !ensureProposalRemoteFresh(ctx, worktree, proposal, options, branch, true) {
 		return
 	}
 	if currentBranch != branch {
@@ -444,6 +455,80 @@ func proposalPushBlockReason(branch, defaultBranch string, options ProposalOptio
 		return fmt.Sprintf("pushing configured default branch %q requires --allow-default-branch-push", defaultBranch)
 	}
 	return ""
+}
+
+func ensureProposalRemoteFresh(ctx context.Context, worktree string, proposal *ProposalReport, options ProposalOptions, branch string, allowAhead bool) bool {
+	if !options.Push {
+		return true
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return true
+	}
+	remote := strings.TrimSpace(options.Remote)
+	if remote == "" {
+		remote = "origin"
+	}
+	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branch, remote, branch)
+	if _, err := gitOutput(ctx, worktree, "fetch", "--prune", remote, refspec); err != nil {
+		if remoteBranchMissing(err) {
+			return true
+		}
+		proposal.Blocked = true
+		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("could not verify %s/%s freshness before proposal commit: %v", remote, branch, err))
+		return false
+	}
+	ahead, behind, err := gitAheadBehind(ctx, worktree, branch, remote)
+	if err != nil {
+		proposal.Errors = append(proposal.Errors, "read git ahead/behind state: "+err.Error())
+		proposal.Blocked = true
+		return false
+	}
+	remoteRef := remote + "/" + branch
+	switch {
+	case ahead > 0 && behind > 0:
+		proposal.Blocked = true
+		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q has diverged from %s after fetch (ahead %d, behind %d); refusing to create another proposal commit on a stale base", branch, remoteRef, ahead, behind))
+		return false
+	case behind > 0:
+		proposal.Blocked = true
+		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q is behind %s by %d commit(s) after fetch; refusing to create proposal commit until the worktree is updated", branch, remoteRef, behind))
+		return false
+	case ahead > 0 && !allowAhead:
+		proposal.Blocked = true
+		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q already has %d unpushed commit(s) relative to %s; refusing to create another proposal commit", branch, ahead, remoteRef))
+		return false
+	default:
+		return true
+	}
+}
+
+func remoteBranchMissing(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "couldn't find remote ref") ||
+		strings.Contains(message, "could not find remote ref")
+}
+
+func gitAheadBehind(ctx context.Context, worktree, branch, remote string) (int, int, error) {
+	localRef := "refs/heads/" + branch
+	remoteRef := "refs/remotes/" + remote + "/" + branch
+	output, err := gitOutput(ctx, worktree, "rev-list", "--left-right", "--count", localRef+"..."+remoteRef)
+	if err != nil {
+		return 0, 0, err
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("unexpected rev-list output %q", strings.TrimSpace(output))
+	}
+	ahead, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse ahead count %q: %w", fields[0], err)
+	}
+	behind, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse behind count %q: %w", fields[1], err)
+	}
+	return ahead, behind, nil
 }
 
 func pushProposalCommit(ctx context.Context, worktree string, proposal *ProposalReport, options ProposalOptions) {

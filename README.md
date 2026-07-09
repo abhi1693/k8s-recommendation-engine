@@ -94,6 +94,37 @@ The report exposes the score, basis, floor, and contributing components. Example
 replica decision: score=0.60 basis=traffic_forecast+latency, availability_floor floor=2 components=traffic_forecast=0.25/pressure,latency=0.35/pressure,availability_floor=0.00/floor
 ```
 
+## Backtest Mode
+
+Use `backtest` to replay Prometheus history and measure whether the predictive policy would have beaten a reactive scaler for the same workload profile.
+
+```bash
+go run ./cmd/k8s-recommendation-engine backtest \
+  --config configs/shipyard-profile.yaml \
+  --prometheus-url http://127.0.0.1:9090 \
+  --window 7d \
+  --step 5m
+```
+
+Backtest answers:
+
+- whether the engine would have scaled before detected spikes
+- how much compute it would save versus observed capacity, reported as replica-hours
+- how often it would over-provision or under-provision compared with a reactive current-signal baseline
+- how many Git proposal commits it would create after stability gating
+
+The report separates `proactiveScaleBeforeSpikes` from `coveredByExistingCapacity`. A spike is only counted as proactive when the predictive replay scaled up before the spike; holding already-existing capacity is counted separately.
+
+JSON output is available for automation:
+
+```bash
+go run ./cmd/k8s-recommendation-engine backtest \
+  --config configs/shipyard-profile.yaml \
+  --prometheus-url http://127.0.0.1:9090 \
+  --window 7d \
+  --output json
+```
+
 ## Workload Guardrails
 
 Each workload can set per-resource change bounds in its profile. `minChangePercent` suppresses CPU or memory request recommendations whose absolute change is smaller than the configured percentage of the current request, which prevents noisy proposal commits such as `76Mi -> 77Mi`.

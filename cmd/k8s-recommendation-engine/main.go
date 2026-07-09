@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/abhi1693/k8s-recommendation-engine/internal/analyzer"
+	"github.com/abhi1693/k8s-recommendation-engine/internal/backtest"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/kube"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/prom"
@@ -38,6 +39,8 @@ func run() error {
 		return runAnalyze(os.Args[2:])
 	case "run":
 		return runContinuous(os.Args[2:])
+	case "backtest":
+		return runBacktest(os.Args[2:])
 	case "proposal":
 		return runProposal(os.Args[2:])
 	case "help", "-h", "--help":
@@ -230,6 +233,94 @@ func runAnalyze(args []string) error {
 	return executeAnalyze(ctx, options, os.Stdout)
 }
 
+func runBacktest(args []string) error {
+	fs := flag.NewFlagSet("backtest", flag.ExitOnError)
+	options := &commandOptions{}
+	fs.StringVar(&options.configPath, "config", "configs/shipyard-profile.yaml", "application profile YAML")
+	fs.StringVar(&options.promURL, "prometheus-url", "http://127.0.0.1:9090", "Prometheus base URL")
+	fs.StringVar(&options.output, "output", "text", "output format: text, summary, pretty, or json")
+	fs.DurationVar(&options.timeout, "timeout", 30*time.Second, "backtest timeout")
+	window := durationFlag{value: 7 * 24 * time.Hour}
+	step := durationFlag{value: 5 * time.Minute}
+	forecastHorizon := durationFlag{value: 30 * time.Minute}
+	fs.Var(&window, "window", "Prometheus replay window; accepts Go durations plus d, for example 7d")
+	fs.Var(&step, "step", "Prometheus query_range step for replay; accepts Go durations plus d")
+	fs.Var(&forecastHorizon, "forecast-horizon", "lookahead horizon used by predictive replay; accepts Go durations plus d")
+	stabilityRuns := fs.Int("stability-runs", 3, "stable replay points required before counting a Git proposal")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if window.value <= 0 {
+		return fmt.Errorf("window must be greater than zero")
+	}
+	if step.value <= 0 {
+		return fmt.Errorf("step must be greater than zero")
+	}
+	if forecastHorizon.value <= 0 {
+		return fmt.Errorf("forecast-horizon must be greater than zero")
+	}
+	if *stabilityRuns <= 0 {
+		return fmt.Errorf("stability-runs must be greater than zero")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), options.timeout)
+	defer cancel()
+
+	profile, err := config.LoadFile(options.configPath)
+	if err != nil {
+		return err
+	}
+	promClient := prom.NewClient(options.promURL, nil)
+	report, err := backtest.Run(ctx, promClient, profile, backtest.Options{
+		Window:          window.value,
+		Step:            step.value,
+		ForecastHorizon: forecastHorizon.value,
+		StabilityRuns:   *stabilityRuns,
+	})
+	if err != nil {
+		return err
+	}
+
+	switch options.output {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	case "text", "pretty", "summary":
+		return backtest.WriteTextReport(os.Stdout, report)
+	default:
+		return fmt.Errorf("unsupported output format %q", options.output)
+	}
+}
+
+type durationFlag struct {
+	value time.Duration
+}
+
+func (d *durationFlag) Set(value string) error {
+	parsed, err := parseDurationWithDays(value)
+	if err != nil {
+		return err
+	}
+	d.value = parsed
+	return nil
+}
+
+func (d durationFlag) String() string {
+	return d.value.String()
+}
+
+func parseDurationWithDays(value string) (time.Duration, error) {
+	if strings.HasSuffix(value, "d") {
+		days, err := time.ParseDuration(strings.TrimSuffix(value, "d") + "h")
+		if err != nil {
+			return 0, err
+		}
+		return days * 24, nil
+	}
+	return time.ParseDuration(value)
+}
+
 func runContinuous(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	options := addCommonFlags(fs)
@@ -365,6 +456,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine analyze [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine run [flags]")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine backtest [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal status [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal diff [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal revert [flags]")
@@ -380,6 +472,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine analyze --mode propose --proposal-kind patch --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet --output actions")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine analyze --mode propose --proposal-kind commit --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet --output actions")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine analyze --mode propose --proposal-kind commit --proposal-branch master --proposal-push --allow-default-branch-push --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet --output actions")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine backtest --config configs/shipyard-profile.yaml --prometheus-url http://127.0.0.1:9090 --window 7d")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal status --git-worktree /path/to/fleet")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal diff --git-worktree /path/to/fleet")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal revert --git-worktree /path/to/fleet")

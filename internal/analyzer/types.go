@@ -139,13 +139,17 @@ type AnomalyStatus struct {
 }
 
 type SignalHistory struct {
-	Window string  `json:"window"`
-	Step   string  `json:"step"`
-	Points int     `json:"points"`
-	Min    float64 `json:"min"`
-	P50    float64 `json:"p50"`
-	P95    float64 `json:"p95"`
-	Max    float64 `json:"max"`
+	Window         string     `json:"window"`
+	Step           string     `json:"step"`
+	Points         int        `json:"points"`
+	ExpectedPoints int        `json:"expectedPoints,omitempty"`
+	Coverage       float64    `json:"coverage,omitempty"`
+	FirstSampleAt  *time.Time `json:"firstSampleAt,omitempty"`
+	LastSampleAt   *time.Time `json:"lastSampleAt,omitempty"`
+	Min            float64    `json:"min"`
+	P50            float64    `json:"p50"`
+	P95            float64    `json:"p95"`
+	Max            float64    `json:"max"`
 }
 
 type SignalForecast struct {
@@ -181,6 +185,7 @@ type Recommendation struct {
 	CurrentMemoryRequest     string                   `json:"currentMemoryRequest,omitempty"`
 	RecommendedMemoryRequest string                   `json:"recommendedMemoryRequest,omitempty"`
 	Confidence               float64                  `json:"confidence"`
+	ConfidenceAssessment     ConfidenceAssessment     `json:"confidenceAssessment"`
 	Safety                   SafetyAssessment         `json:"safety"`
 	Learning                 LearningEvidence         `json:"learning"`
 	ReplicaDecision          *ReplicaDecision         `json:"replicaDecision,omitempty"`
@@ -189,6 +194,24 @@ type Recommendation struct {
 	BlockReasons             []string                 `json:"blockReasons,omitempty"`
 	PatchPlan                *PatchPlan               `json:"patchPlan,omitempty"`
 	Stability                *RecommendationStability `json:"stability,omitempty"`
+}
+
+type ConfidenceAssessment struct {
+	Base              float64                  `json:"base"`
+	Adjusted          float64                  `json:"adjusted"`
+	Decay             float64                  `json:"decay"`
+	MinAutoCommit     float64                  `json:"minAutoCommit"`
+	AutoCommitAllowed bool                     `json:"autoCommitAllowed"`
+	Reasons           []string                 `json:"reasons,omitempty"`
+	Signals           []SignalConfidenceFactor `json:"signals,omitempty"`
+}
+
+type SignalConfidenceFactor struct {
+	Name     string  `json:"name"`
+	Required bool    `json:"required"`
+	Quality  string  `json:"quality"`
+	Decay    float64 `json:"decay"`
+	Reason   string  `json:"reason"`
 }
 
 type SafetyAssessment struct {

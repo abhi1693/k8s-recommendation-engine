@@ -369,6 +369,60 @@ func TestBuildRecommendationScalesDownWhenDemandAndPolicyAllow(t *testing.T) {
 	}
 }
 
+func TestBuildRecommendationBlocksChangeWhenPrometheusHistoryIsSparse(t *testing.T) {
+	report := scaleDownCandidateReport()
+	report.MetricSignals = []SignalReport{
+		sparseSignal("available_replicas", 2, 2, 2, 2),
+		sparseSignal("request_rate", 0.25, 0.2, 0.5, 2),
+		sparseSignal("cpu_usage", 1.5, 1.1, 1.5, 1.6),
+		sparseSignal("memory_working_set", 128*1024*1024, 96*1024*1024, 128*1024*1024, 160*1024*1024),
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{Replicas: true, CPU: true, Memory: true},
+		Bounds: config.BoundsSpec{
+			Replicas: config.ReplicaBounds{Min: 1, Max: 4},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.Confidence >= got.ConfidenceAssessment.MinAutoCommit {
+		t.Fatalf("confidence = %.2f, want below %.2f", got.Confidence, got.ConfidenceAssessment.MinAutoCommit)
+	}
+	if got.RecommendedCPURequest == got.CurrentCPURequest {
+		t.Fatal("CPU request did not change; test needs an actionable recommendation")
+	}
+	if !got.Blocked {
+		t.Fatal("Blocked = false, want true for sparse Prometheus data")
+	}
+	if !hasReasonPrefix(got, "confidence_below_min_auto_commit") {
+		t.Fatalf("missing confidence block reason: %#v", got.ReasonCodes)
+	}
+	if len(got.ConfidenceAssessment.Signals) == 0 {
+		t.Fatal("confidence signals missing")
+	}
+}
+
+func TestBuildRecommendationHonorsConfiguredMinAutoCommitConfidence(t *testing.T) {
+	report := scaleDownCandidateReport()
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{Replicas: true, CPU: true, Memory: true},
+		Bounds: config.BoundsSpec{
+			Replicas: config.ReplicaBounds{Min: 1, Max: 4},
+		},
+		Policy: config.PolicySpec{
+			Confidence: config.ConfidencePolicySpec{MinAutoCommit: 0.96},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.ConfidenceAssessment.MinAutoCommit != 0.96 {
+		t.Fatalf("MinAutoCommit = %.2f, want 0.96", got.ConfidenceAssessment.MinAutoCommit)
+	}
+	if !got.Blocked {
+		t.Fatal("Blocked = false, want true when configured confidence threshold is higher than adjusted confidence")
+	}
+}
+
 func TestBuildRecommendationHonorsAvailabilityFloor(t *testing.T) {
 	report := scaleDownCandidateReport()
 	report.Availability = AvailabilityReport{
@@ -615,6 +669,21 @@ func sampleSignal(name string, value float64) SignalReport {
 
 func sampleSignalWithHistory(name string, value float64, history SignalHistory) SignalReport {
 	return SignalReport{Name: name, Healthy: true, Sample: &value, History: &history}
+}
+
+func sparseSignal(name string, value, p50, p95, max float64) SignalReport {
+	signal := sampleSignalWithHistory(name, value, SignalHistory{
+		Window:         "6h",
+		Step:           "5m",
+		Points:         3,
+		ExpectedPoints: 72,
+		Coverage:       0.04,
+		P50:            p50,
+		P95:            p95,
+		Max:            max,
+	})
+	signal.Required = true
+	return signal
 }
 
 func scaleDownCandidateReport() WorkloadReport {

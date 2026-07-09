@@ -38,6 +38,14 @@ func TestValidateRejectsUnsupportedMaxDecreaseRisk(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidMinAutoCommitConfidence(t *testing.T) {
+	profile := validTestProfile()
+	profile.Spec.Workloads[0].Policy.Confidence.MinAutoCommit = 1.2
+	if err := profile.Validate(); err == nil {
+		t.Fatal("Validate() expected invalid minAutoCommit error")
+	}
+}
+
 func validTestProfile() *ApplicationProfile {
 	return &ApplicationProfile{
 		Metadata: Metadata{Name: "shipyard"},

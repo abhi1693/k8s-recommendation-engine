@@ -565,6 +565,16 @@ func writePrettyWorkload(w io.Writer, workload WorkloadReport) error {
 			return err
 		}
 	}
+	if len(rec.ConfidenceAssessment.Reasons) > 0 {
+		if _, err := fmt.Fprintf(w, "    confidence: base=%.2f adjusted=%.2f decay=%.2f minAutoCommit=%.2f allowed=%t\n", rec.ConfidenceAssessment.Base, rec.ConfidenceAssessment.Adjusted, rec.ConfidenceAssessment.Decay, rec.ConfidenceAssessment.MinAutoCommit, rec.ConfidenceAssessment.AutoCommitAllowed); err != nil {
+			return err
+		}
+		for _, reason := range rec.ConfidenceAssessment.Reasons {
+			if _, err := fmt.Fprintf(w, "      - %s\n", reason); err != nil {
+				return err
+			}
+		}
+	}
 	if len(rec.Safety.Reasons) > 0 {
 		if _, err := fmt.Fprintln(w, "    safety:"); err != nil {
 			return err

@@ -733,7 +733,8 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 
 	applyMinimumResourceChangeThreshold(workload, &recommendation)
 	recommendation.Learning = buildLearningEvidence(workload, report, recommendation, trafficDecision, cpuDrivenReplicas, memoryDrivenReplicas)
-	recommendation.Confidence = recommendationConfidence(report, hasCPU, hasMemory, hasRequestRate)
+	baseConfidence := recommendationConfidence(report, hasCPU, hasMemory, hasRequestRate)
+	applyConfidenceDecay(workload, report, sharedSignals, &recommendation, baseConfidence)
 	return recommendation
 }
 
@@ -1595,23 +1596,45 @@ func aggregateRangeSamples(result *prom.RangeQueryResult) []prom.Sample {
 
 func summarizeSamples(samples []prom.Sample, window, step time.Duration) *SignalHistory {
 	var values []float64
+	var firstSampleAt, lastSampleAt *time.Time
 	for _, sample := range samples {
 		if !math.IsNaN(sample.Value) && !math.IsInf(sample.Value, 0) {
 			values = append(values, sample.Value)
+			sampledAt := time.Unix(0, int64(sample.Timestamp*float64(time.Second))).UTC()
+			if firstSampleAt == nil || sampledAt.Before(*firstSampleAt) {
+				value := sampledAt
+				firstSampleAt = &value
+			}
+			if lastSampleAt == nil || sampledAt.After(*lastSampleAt) {
+				value := sampledAt
+				lastSampleAt = &value
+			}
 		}
 	}
 	if len(values) == 0 {
 		return nil
 	}
 	sort.Float64s(values)
+	expectedPoints := 0
+	if step > 0 && window > 0 {
+		expectedPoints = int(math.Ceil(float64(window) / float64(step)))
+	}
+	coverage := 0.0
+	if expectedPoints > 0 {
+		coverage = math.Min(1, float64(len(values))/float64(expectedPoints))
+	}
 	return &SignalHistory{
-		Window: formatDuration(window),
-		Step:   formatDuration(step),
-		Points: len(values),
-		Min:    values[0],
-		P50:    percentile(values, 0.50),
-		P95:    percentile(values, 0.95),
-		Max:    values[len(values)-1],
+		Window:         formatDuration(window),
+		Step:           formatDuration(step),
+		Points:         len(values),
+		ExpectedPoints: expectedPoints,
+		Coverage:       coverage,
+		FirstSampleAt:  firstSampleAt,
+		LastSampleAt:   lastSampleAt,
+		Min:            values[0],
+		P50:            percentile(values, 0.50),
+		P95:            percentile(values, 0.95),
+		Max:            values[len(values)-1],
 	}
 }
 
@@ -1775,6 +1798,184 @@ func recommendationConfidence(report WorkloadReport, hasCPU, hasMemory, hasTraff
 		confidence += 0.1
 	}
 	return math.Min(confidence, 0.95)
+}
+
+func applyConfidenceDecay(workload config.WorkloadSpec, report WorkloadReport, sharedSignals []SignalReport, recommendation *Recommendation, baseConfidence float64) {
+	assessment := ConfidenceAssessment{
+		Base:              roundFloat(baseConfidence, 3),
+		Adjusted:          roundFloat(baseConfidence, 3),
+		MinAutoCommit:     confidenceMinAutoCommit(workload.Policy.Confidence),
+		AutoCommitAllowed: true,
+	}
+	for _, factor := range confidenceSignalFactors(report.MetricSignals, time.Now().UTC()) {
+		assessment.Signals = append(assessment.Signals, factor)
+		assessment.Decay += factor.Decay
+		if factor.Decay > 0 {
+			assessment.Reasons = append(assessment.Reasons, factor.Name+": "+factor.Reason)
+		}
+	}
+	for _, factor := range confidenceSignalFactors(sharedSignals, time.Now().UTC()) {
+		assessment.Signals = append(assessment.Signals, factor)
+		assessment.Decay += factor.Decay
+		if factor.Decay > 0 {
+			assessment.Reasons = append(assessment.Reasons, "shared_"+factor.Name+": "+factor.Reason)
+		}
+	}
+	assessment.Decay = roundFloat(math.Min(0.6, assessment.Decay), 3)
+	assessment.Adjusted = roundFloat(clampFloat(baseConfidence-assessment.Decay, 0, 0.95), 3)
+	assessment.AutoCommitAllowed = assessment.Adjusted >= assessment.MinAutoCommit
+	if assessment.AutoCommitAllowed && len(assessment.Reasons) == 0 {
+		assessment.Reasons = append(assessment.Reasons, "prometheus signal quality supports confidence")
+	}
+	recommendation.Confidence = assessment.Adjusted
+	recommendation.ConfidenceAssessment = assessment
+	if !assessment.AutoCommitAllowed && recommendationHasChange(*recommendation) {
+		reason := fmt.Sprintf("confidence %.2f below minAutoCommit %.2f blocks auto-commit", assessment.Adjusted, assessment.MinAutoCommit)
+		recommendation.Blocked = true
+		if !stringSliceContains(recommendation.BlockReasons, reason) {
+			recommendation.BlockReasons = append(recommendation.BlockReasons, reason)
+		}
+		if !stringSliceContains(recommendation.ReasonCodes, "confidence_below_min_auto_commit") {
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "confidence_below_min_auto_commit")
+		}
+	}
+}
+
+func confidenceMinAutoCommit(policy config.ConfidencePolicySpec) float64 {
+	if policy.MinAutoCommit > 0 {
+		return policy.MinAutoCommit
+	}
+	return 0.75
+}
+
+func confidenceSignalFactors(signals []SignalReport, now time.Time) []SignalConfidenceFactor {
+	var factors []SignalConfidenceFactor
+	for _, signal := range signals {
+		if !confidenceSignalRelevant(signal) {
+			continue
+		}
+		factors = append(factors, confidenceSignalFactor(signal, now))
+	}
+	return factors
+}
+
+func confidenceSignalRelevant(signal SignalReport) bool {
+	if signal.Required {
+		return true
+	}
+	switch signal.Name {
+	case "request_rate", "latency_p95", "error_rate", "concurrent_requests", "cpu_usage", "memory_working_set":
+		return signal.Sample != nil || signal.History != nil || signal.HistoryError != "" || signal.Error != ""
+	default:
+		return false
+	}
+}
+
+func confidenceSignalFactor(signal SignalReport, now time.Time) SignalConfidenceFactor {
+	factor := SignalConfidenceFactor{Name: signal.Name, Required: signal.Required, Quality: "ok"}
+	switch {
+	case signal.Error != "":
+		factor.Quality = "stale"
+		factor.Decay = confidenceDecay(signal.Required, 0.20, 0.08)
+		factor.Reason = "current query error: " + signal.Error
+		return factor
+	case signal.Sample == nil:
+		factor.Quality = "stale"
+		factor.Decay = confidenceDecay(signal.Required, 0.18, 0.06)
+		factor.Reason = "no current sample"
+		return factor
+	case signal.HistoryError != "":
+		factor.Quality = "sparse"
+		factor.Decay = confidenceDecay(signal.Required, 0.14, 0.05)
+		factor.Reason = "history query error: " + signal.HistoryError
+		return factor
+	case signal.History == nil:
+		factor.Quality = "sparse"
+		factor.Decay = confidenceDecay(signal.Required, 0.16, 0.05)
+		factor.Reason = "no range history"
+		return factor
+	}
+	history := signal.History
+	switch {
+	case history.ExpectedPoints > 0 && history.Coverage < 0.50:
+		factor.Quality = "sparse"
+		factor.Decay = confidenceDecay(signal.Required, 0.14, 0.05)
+		factor.Reason = fmt.Sprintf("history coverage %.0f%% with %d/%d points", history.Coverage*100, history.Points, history.ExpectedPoints)
+	case history.Points < 6:
+		factor.Quality = "sparse"
+		factor.Decay = confidenceDecay(signal.Required, 0.12, 0.04)
+		factor.Reason = fmt.Sprintf("only %d history points", history.Points)
+	case historyStale(history, now):
+		factor.Quality = "stale"
+		factor.Decay = confidenceDecay(signal.Required, 0.16, 0.06)
+		factor.Reason = fmt.Sprintf("last history sample at %s", history.LastSampleAt.Format(time.RFC3339))
+	case historyNoisy(*history, signal.Forecast):
+		factor.Quality = "noisy"
+		factor.Decay = confidenceDecay(signal.Required, 0.10, 0.04)
+		factor.Reason = "history or forecast band is noisy"
+	default:
+		if history.ExpectedPoints > 0 {
+			factor.Reason = fmt.Sprintf("history coverage %.0f%% with %d points", history.Coverage*100, history.Points)
+		} else {
+			factor.Reason = fmt.Sprintf("history has %d points", history.Points)
+		}
+	}
+	factor.Decay = roundFloat(factor.Decay, 3)
+	return factor
+}
+
+func confidenceDecay(required bool, requiredDecay, optionalDecay float64) float64 {
+	if required {
+		return requiredDecay
+	}
+	return optionalDecay
+}
+
+func historyStale(history *SignalHistory, now time.Time) bool {
+	if history == nil || history.LastSampleAt == nil || now.IsZero() {
+		return false
+	}
+	step, err := time.ParseDuration(history.Step)
+	if err != nil || step <= 0 {
+		step = 5 * time.Minute
+	}
+	staleAfter := maxDuration(3*step, 15*time.Minute)
+	return now.Sub(*history.LastSampleAt) > staleAfter
+}
+
+func historyNoisy(history SignalHistory, forecast *SignalForecast) bool {
+	if history.P50 > 0.001 && (history.P95-history.P50)/math.Abs(history.P50) > 1.5 {
+		return true
+	}
+	if history.P95 > 0.001 && history.Max/history.P95 > 3 {
+		return true
+	}
+	if forecast != nil {
+		for _, horizon := range forecast.Horizons {
+			if horizon.Confidence > 0 && horizon.Confidence < 0.50 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func recommendationHasChange(recommendation Recommendation) bool {
+	return recommendation.RecommendedReplicas != recommendation.CurrentReplicas ||
+		(recommendation.CurrentCPURequest != "" && recommendation.RecommendedCPURequest != "" && recommendation.RecommendedCPURequest != recommendation.CurrentCPURequest) ||
+		(recommendation.CurrentMemoryRequest != "" && recommendation.RecommendedMemoryRequest != "" && recommendation.RecommendedMemoryRequest != recommendation.CurrentMemoryRequest)
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func roundFloat(value float64, places int) float64 {
+	scale := math.Pow10(places)
+	return math.Round(value*scale) / scale
 }
 
 type resourcePolicyProfile struct {

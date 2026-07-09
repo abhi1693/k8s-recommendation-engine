@@ -86,15 +86,20 @@ type ChangeBounds struct {
 }
 
 type PolicySpec struct {
-	MaxProposalsPerHour int              `yaml:"maxProposalsPerHour" json:"maxProposalsPerHour"`
-	MaxProposalsPerDay  int              `yaml:"maxProposalsPerDay" json:"maxProposalsPerDay"`
-	Safety              SafetyPolicySpec `yaml:"safety" json:"safety"`
+	MaxProposalsPerHour int                  `yaml:"maxProposalsPerHour" json:"maxProposalsPerHour"`
+	MaxProposalsPerDay  int                  `yaml:"maxProposalsPerDay" json:"maxProposalsPerDay"`
+	Safety              SafetyPolicySpec     `yaml:"safety" json:"safety"`
+	Confidence          ConfidencePolicySpec `yaml:"confidence" json:"confidence"`
 }
 
 type SafetyPolicySpec struct {
 	AllowAutoCommit     []string `yaml:"allowAutoCommit" json:"allowAutoCommit"`
 	MaxDecreaseRisk     string   `yaml:"maxDecreaseRisk" json:"maxDecreaseRisk"`
 	UrgentBypassAllowed *bool    `yaml:"urgentBypassAllowed" json:"urgentBypassAllowed,omitempty"`
+}
+
+type ConfidencePolicySpec struct {
+	MinAutoCommit float64 `yaml:"minAutoCommit" json:"minAutoCommit"`
 }
 
 type MetricProfile struct {
@@ -168,6 +173,9 @@ func (p *ApplicationProfile) Validate() error {
 		}
 		if workload.Policy.Safety.MaxDecreaseRisk != "" && !validSafetyRisk(workload.Policy.Safety.MaxDecreaseRisk) {
 			return fmt.Errorf("workload %s policy.safety.maxDecreaseRisk %q is unsupported", workload.Name, workload.Policy.Safety.MaxDecreaseRisk)
+		}
+		if workload.Policy.Confidence.MinAutoCommit < 0 || workload.Policy.Confidence.MinAutoCommit > 1 {
+			return fmt.Errorf("workload %s policy.confidence.minAutoCommit must be between 0 and 1", workload.Name)
 		}
 	}
 	for _, signal := range p.Spec.SharedSignals {

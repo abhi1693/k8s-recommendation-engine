@@ -33,6 +33,8 @@ func NewClient(kubeconfigPath, contextName string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	restConfig.QPS = 50
+	restConfig.Burst = 100
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, err

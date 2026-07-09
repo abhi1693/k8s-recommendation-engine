@@ -204,6 +204,61 @@ spec: {}
 	}
 }
 
+func TestCreateProposalCommitMarksPushFailureBlocked(t *testing.T) {
+	worktree := initProposalGitRepo(t)
+	remote := initBareGitRepo(t)
+	gitTest(t, worktree, "remote", "add", "origin", remote)
+	writeRepoFile(t, worktree, "app.yaml", `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipyardhq
+  namespace: shipyardhq
+spec: {}
+`)
+	gitTest(t, worktree, "add", ".")
+	gitTest(t, worktree, "commit", "-m", "initial")
+	gitTest(t, worktree, "push", "-u", "origin", "master")
+	hook := filepath.Join(remote, "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho rejected by test hook >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	proposal := CreateProposal(context.Background(), worktree, proposalReplicasReport(), ProposalOptions{
+		Kind:                   "commit",
+		BranchName:             "master",
+		DefaultBranch:          "master",
+		Remote:                 "origin",
+		Push:                   true,
+		AllowDefaultBranchPush: true,
+	})
+	if !proposal.Blocked {
+		t.Fatalf("proposal should be blocked after push failure: %#v", proposal)
+	}
+	if proposal.Commit == "" {
+		t.Fatalf("proposal commit should be recorded after local commit: %#v", proposal)
+	}
+	if proposal.Pushed {
+		t.Fatalf("proposal.Pushed = true, want false: %#v", proposal)
+	}
+	if proposal.Remote != "origin" {
+		t.Fatalf("proposal.Remote = %q, want origin", proposal.Remote)
+	}
+	if len(proposal.BlockReasons) != 1 || !strings.Contains(proposal.BlockReasons[0], "push to origin/master failed") {
+		t.Fatalf("BlockReasons = %#v, want push failure block", proposal.BlockReasons)
+	}
+	if len(proposal.Errors) != 1 || !strings.Contains(proposal.Errors[0], "push proposal commit") || !strings.Contains(proposal.Errors[0], "rejected by test hook") {
+		t.Fatalf("Errors = %#v, want push error", proposal.Errors)
+	}
+	if proposal.Message != "proposal commit created locally, but push failed" {
+		t.Fatalf("Message = %q", proposal.Message)
+	}
+	remoteHead := strings.TrimSpace(gitBareTest(t, remote, "rev-parse", "--short", "master"))
+	if remoteHead == proposal.Commit {
+		t.Fatalf("remote should not advance to failed proposal commit %s", proposal.Commit)
+	}
+}
+
 func TestCreateProposalCommitBlocksWhenRemoteAdvanced(t *testing.T) {
 	worktree := initProposalGitRepo(t)
 	remote := initBareGitRepo(t)

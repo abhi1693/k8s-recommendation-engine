@@ -586,6 +586,53 @@ func TestProposalBudgetIsUnlimitedWhenUnset(t *testing.T) {
 	}
 }
 
+func TestRecordProposalEventsPersistsPushFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	report.Proposal.Blocked = true
+	report.Proposal.Commit = "abc123"
+	report.Proposal.Remote = "origin"
+	report.Proposal.Message = "proposal commit created locally, but push failed"
+	report.Proposal.BlockReasons = []string{"push to origin/master failed"}
+	report.Proposal.Errors = []string{"push proposal commit: rejected"}
+
+	if err := RecordProposalEvents(context.Background(), path, report); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var status string
+	var message string
+	var pushed int
+	var remote string
+	var errorsJSON string
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT status, message, pushed, remote, errors_json
+		FROM proposal_events
+		WHERE application = ? AND workload_name = ?
+	`, "shipyard", "web").Scan(&status, &message, &pushed, &remote, &errorsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || message != "proposal commit created locally, but push failed" || pushed != 0 || remote != "origin" {
+		t.Fatalf("event fields = status:%q message:%q pushed:%d remote:%q", status, message, pushed, remote)
+	}
+	if !strings.Contains(errorsJSON, "push proposal commit: rejected") {
+		t.Fatalf("errors_json = %s", errorsJSON)
+	}
+
+	count, err := store.countProposalEventsSince(context.Background(), "shipyard", "shipyardhq", "web", time.Date(2026, 7, 9, 17, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("failed proposal event should not count against budget, got %d", count)
+	}
+}
+
 func TestProposalBatchBlocksUntilWindowElapses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))

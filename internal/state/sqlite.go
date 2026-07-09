@@ -209,7 +209,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			proposal_kind TEXT NOT NULL,
 			proposal_commit TEXT NOT NULL,
 			proposal_patch_file TEXT NOT NULL,
-			changes_count INTEGER NOT NULL
+			changes_count INTEGER NOT NULL,
+			status TEXT NOT NULL DEFAULT 'created',
+			message TEXT NOT NULL DEFAULT '',
+			pushed INTEGER NOT NULL DEFAULT 0,
+			remote TEXT NOT NULL DEFAULT '',
+			push_ref TEXT NOT NULL DEFAULT '',
+			errors_json TEXT NOT NULL DEFAULT '[]'
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_proposal_events_lookup
 			ON proposal_events(application, namespace, workload_name, generated_at);`,
@@ -268,6 +274,24 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "workload_runs", "memory_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proposal_events", "status", "TEXT NOT NULL DEFAULT 'created'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proposal_events", "message", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proposal_events", "pushed", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proposal_events", "remote", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proposal_events", "push_ref", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "proposal_events", "errors_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
 		return err
 	}
 	return nil

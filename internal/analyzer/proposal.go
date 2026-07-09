@@ -537,13 +537,15 @@ func pushProposalCommit(ctx context.Context, worktree string, proposal *Proposal
 	if remote == "" {
 		remote = "origin"
 	}
+	proposal.Remote = remote
 	if _, err := gitOutput(ctx, worktree, "push", "-u", remote, branch); err != nil {
+		proposal.Blocked = true
+		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("push to %s/%s failed; proposal commit exists only in the local worktree", remote, branch))
 		proposal.Errors = append(proposal.Errors, "push proposal commit: "+err.Error())
 		proposal.Message = "proposal commit created locally, but push failed"
 		return
 	}
 	proposal.Pushed = true
-	proposal.Remote = remote
 	proposal.PushRef = remote + "/" + branch
 	proposal.Message = "proposal commit pushed; Fleet can reconcile after Git updates"
 }

@@ -507,6 +507,7 @@ func (s *Store) countProposalEventsSince(ctx context.Context, application, names
 			AND namespace = ?
 			AND workload_name = ?
 			AND generated_at >= ?
+			AND status NOT IN ('failed', 'blocked')
 	`, application, namespace, workload, since.Format(time.RFC3339Nano)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count proposal events: %w", err)
@@ -515,8 +516,13 @@ func (s *Store) countProposalEventsSince(ctx context.Context, application, names
 }
 
 func (s *Store) RecordProposalEvents(ctx context.Context, report *analyzer.Report) error {
-	if report.Proposal == nil || !report.Proposal.Needed || report.Proposal.Blocked || len(report.Proposal.Errors) > 0 {
+	if report.Proposal == nil || !report.Proposal.Needed {
 		return nil
+	}
+	status := proposalEventStatus(report.Proposal)
+	errorsJSON, err := json.Marshal(report.Proposal.Errors)
+	if err != nil {
+		return fmt.Errorf("encode proposal errors: %w", err)
 	}
 	for _, workload := range report.Workloads {
 		plan := workload.Recommendation.PatchPlan
@@ -533,9 +539,15 @@ func (s *Store) RecordProposalEvents(ctx context.Context, report *analyzer.Repor
 				proposal_kind,
 				proposal_commit,
 				proposal_patch_file,
-				changes_count
+				changes_count,
+				status,
+				message,
+				pushed,
+				remote,
+				push_ref,
+				errors_json
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			report.Application,
 			workload.Namespace,
@@ -546,11 +558,19 @@ func (s *Store) RecordProposalEvents(ctx context.Context, report *analyzer.Repor
 			report.Proposal.Commit,
 			report.Proposal.PatchFile,
 			len(plan.Changes),
+			status,
+			report.Proposal.Message,
+			boolToInt(report.Proposal.Pushed),
+			report.Proposal.Remote,
+			report.Proposal.PushRef,
+			string(errorsJSON),
 		); err != nil {
 			return fmt.Errorf("record proposal event: %w", err)
 		}
-		if err := s.deleteProposalBatchItem(ctx, report.Application, workload.Namespace, workload.Name); err != nil {
-			return err
+		if status != "failed" && status != "blocked" {
+			if err := s.deleteProposalBatchItem(ctx, report.Application, workload.Namespace, workload.Name); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -558,6 +578,35 @@ func (s *Store) RecordProposalEvents(ctx context.Context, report *analyzer.Repor
 
 func proposalEventPlan(plan *analyzer.PatchPlan) bool {
 	return plan != nil && plan.Needed && !plan.Blocked && len(plan.Errors) == 0 && len(plan.Changes) > 0
+}
+
+func proposalEventStatus(proposal *analyzer.ProposalReport) string {
+	if proposal == nil {
+		return ""
+	}
+	if len(proposal.Errors) > 0 {
+		return "failed"
+	}
+	if proposal.Blocked {
+		return "blocked"
+	}
+	if proposal.Pushed {
+		return "pushed"
+	}
+	if proposal.Commit != "" {
+		return "local_commit"
+	}
+	if proposal.PatchFile != "" {
+		return "patch"
+	}
+	return "created"
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func reportHasNoApplyablePlans(report *analyzer.Report) bool {

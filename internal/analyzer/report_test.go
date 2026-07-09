@@ -179,6 +179,62 @@ func TestWriteSummaryReport(t *testing.T) {
 	}
 }
 
+func TestWriteSummaryReportIncludesProposalFailure(t *testing.T) {
+	report := &Report{
+		Application: "shipyard",
+		Namespace:   "shipyardhq",
+		GeneratedAt: time.Date(2026, 7, 8, 18, 55, 34, 0, time.UTC),
+		Summary: Summary{
+			WorkloadsTotal: 1,
+			MetricsHealthy: 1,
+		},
+		Proposal: &ProposalReport{
+			Mode:         "propose",
+			Kind:         "commit",
+			Needed:       true,
+			Blocked:      true,
+			Branch:       "master",
+			Commit:       "abc123",
+			Remote:       "origin",
+			Message:      "proposal commit created locally, but push failed",
+			BlockReasons: []string{"push to origin/master failed; proposal commit exists only in the local worktree"},
+			Errors:       []string{"push proposal commit: rejected"},
+		},
+		Workloads: []WorkloadReport{
+			{
+				Namespace:  "shipyardhq",
+				Deployment: "shipyardhq",
+				Recommendation: Recommendation{
+					CurrentReplicas:          2,
+					RecommendedReplicas:      2,
+					CurrentCPURequest:        "700m",
+					RecommendedCPURequest:    "700m",
+					CurrentMemoryRequest:     "5Gi",
+					RecommendedMemoryRequest: "5Gi",
+				},
+			},
+		},
+	}
+
+	var output bytes.Buffer
+	if err := WriteSummaryReport(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, want := range []string{
+		"Proposal: mode=propose kind=commit needed=true blocked=true",
+		"Proposal git: branch=master commit=abc123",
+		"Proposal push: pushed=false remote=origin ref=-",
+		"Proposal note: proposal commit created locally, but push failed",
+		"Proposal blocked: push to origin/master failed",
+		"Proposal error: push proposal commit: rejected",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary report missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestReplicaBasisPrefersScaleUpDriverOverAvailabilityFloor(t *testing.T) {
 	recommendation := Recommendation{
 		CurrentReplicas:     2,

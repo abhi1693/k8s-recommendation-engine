@@ -219,6 +219,14 @@ func WriteSummaryReport(w io.Writer, report *Report) error {
 	if err := writeCompactDecisionSummary(w, report); err != nil {
 		return err
 	}
+	if report.Proposal != nil {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if err := writeProposalSummary(w, report.Proposal); err != nil {
+			return err
+		}
+	}
 	_, err := fmt.Fprintf(w, "\nSummary: workloads=%d commitBlocked=%d metricsHealthy=%d metricsDegraded=%d metricsUnhealthy=%d\n",
 		report.Summary.WorkloadsTotal,
 		report.Summary.CommitBlocked,

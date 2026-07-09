@@ -406,6 +406,7 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 	if err := state.AttachAndRecord(ctx, options.stateDB, report); err != nil {
 		return err
 	}
+	analyzer.AttachSafetyAssessments(report)
 	analyzer.AttachPatchPlans(options.gitWorktree, profile, report)
 	if err := state.ApplyProposalBudgets(ctx, options.stateDB, report, profile); err != nil {
 		return err

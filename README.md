@@ -149,6 +149,14 @@ policy:
 
 Before writing a proposal, the engine also checks the live Deployment rollout state. A proposal is blocked while the Deployment generation is still pending, updated/ready/available replicas have not caught up, unavailable replicas exist, or selected Pods are terminating, pending, unready, or have incomplete init containers. This prevents the controller from stacking new recommendations on top of an app that Fleet or Kubernetes has not finished applying yet.
 
+Every recommendation also gets a safety classification before any Git proposal is written:
+
+- `low_risk`
+- `medium_risk`
+- `high_risk`
+
+Safety considers resource decrease size, prior forecast accuracy, workload health, rollout history, memory headroom, and traffic anomaly state. `low_risk` and `medium_risk` recommendations can be proposed automatically after the normal stability, rollout, budget, and Git gates pass. `high_risk` recommendations are reported but blocked from auto-commit.
+
 ## Run Continuously Without Git Changes
 
 Use `run` for controller-like continuous reconciliation in dry-run mode. This reads Kubernetes and Prometheus, records learning state when `--state-db` is set, and prints recommendations every interval. It does not patch Kubernetes and does not write to Git.

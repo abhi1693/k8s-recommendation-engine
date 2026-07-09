@@ -116,7 +116,7 @@ func WriteTextReport(w io.Writer, report *Report) error {
 		if _, err := fmt.Fprintln(w, "      recommendation:"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "        mode: %s confidence: %.2f blocked: %t\n", workload.Recommendation.Mode, workload.Recommendation.Confidence, workload.Recommendation.Blocked); err != nil {
+		if _, err := fmt.Fprintf(w, "        mode: %s confidence: %.2f safety=%s blocked: %t\n", workload.Recommendation.Mode, workload.Recommendation.Confidence, safetySummary(workload.Recommendation), workload.Recommendation.Blocked); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(w, "        replicas: %d -> %d\n", workload.Recommendation.CurrentReplicas, workload.Recommendation.RecommendedReplicas); err != nil {
@@ -134,6 +134,11 @@ func WriteTextReport(w io.Writer, report *Report) error {
 		}
 		if len(workload.Recommendation.ReasonCodes) > 0 {
 			if _, err := fmt.Fprintf(w, "        reasons: %s\n", strings.Join(workload.Recommendation.ReasonCodes, "; ")); err != nil {
+				return err
+			}
+		}
+		if len(workload.Recommendation.Safety.Reasons) > 0 {
+			if _, err := fmt.Fprintf(w, "        safety reasons: %s\n", strings.Join(workload.Recommendation.Safety.Reasons, "; ")); err != nil {
 				return err
 			}
 		}
@@ -262,7 +267,7 @@ func WriteActionsReport(w io.Writer, report *Report, gitWorktreeEnabled bool) er
 				return err
 			}
 		}
-		if _, err := fmt.Fprintf(w, "  decision: %s confidence=%.2f outcome=%s\n", primaryDecision(rec), rec.Confidence, lastOutcome(rec)); err != nil {
+		if _, err := fmt.Fprintf(w, "  decision: %s confidence=%.2f safety=%s outcome=%s\n", primaryDecision(rec), rec.Confidence, safetySummary(rec), lastOutcome(rec)); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(w, "  gates: replicas=%s cpu=%s memory=%s actionable=%s\n", replicaStabilitySummary(rec), cpuStabilitySummary(rec), memoryStabilitySummary(rec), actionableSummary(rec)); err != nil {
@@ -431,7 +436,7 @@ func writeCompactDecisionSummary(w io.Writer, report *Report) error {
 		if _, err := fmt.Fprintf(w, "  status:   metrics=%s blocked=%t outcome=%s\n", workload.MetricsCondition, rec.Blocked, lastOutcome(rec)); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "  decision: %s confidence=%.2f actionable=%s\n", primaryDecision(rec), rec.Confidence, actionableSummary(rec)); err != nil {
+		if _, err := fmt.Fprintf(w, "  decision: %s confidence=%.2f safety=%s actionable=%s\n", primaryDecision(rec), rec.Confidence, safetySummary(rec), actionableSummary(rec)); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintf(w, "  replicas: %s basis=%s stability=%s\n", replicaDelta(rec), replicaBasis(rec), replicaStabilitySummary(rec)); err != nil {
@@ -538,7 +543,7 @@ func writePrettyWorkload(w io.Writer, workload WorkloadReport) error {
 	if _, err := fmt.Fprintln(w, "  Recommendation:"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "    mode=%s confidence=%.2f blocked=%t\n", rec.Mode, rec.Confidence, rec.Blocked); err != nil {
+	if _, err := fmt.Fprintf(w, "    mode=%s confidence=%.2f safety=%s blocked=%t\n", rec.Mode, rec.Confidence, safetySummary(rec), rec.Blocked); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "    replicas: %s\n", replicaDelta(rec)); err != nil {
@@ -558,6 +563,16 @@ func writePrettyWorkload(w io.Writer, workload WorkloadReport) error {
 	if len(rec.BlockReasons) > 0 {
 		if _, err := fmt.Fprintf(w, "    block reasons: %s\n", strings.Join(rec.BlockReasons, "; ")); err != nil {
 			return err
+		}
+	}
+	if len(rec.Safety.Reasons) > 0 {
+		if _, err := fmt.Fprintln(w, "    safety:"); err != nil {
+			return err
+		}
+		for _, reason := range rec.Safety.Reasons {
+			if _, err := fmt.Fprintf(w, "      - %s\n", reason); err != nil {
+				return err
+			}
 		}
 	}
 	if rec.Stability != nil {
@@ -853,6 +868,11 @@ func writePrettyPatchPlan(w io.Writer, plan *PatchPlan) error {
 	if _, err := fmt.Fprintf(w, "    patch plan: source=%s needed=%t blocked=%t\n", emptyDash(plan.SourceFile), plan.Needed, plan.Blocked); err != nil {
 		return err
 	}
+	if len(plan.BlockReasons) > 0 {
+		if _, err := fmt.Fprintf(w, "      block reasons: %s\n", strings.Join(plan.BlockReasons, "; ")); err != nil {
+			return err
+		}
+	}
 	if len(plan.Errors) > 0 {
 		if _, err := fmt.Fprintf(w, "      errors: %s\n", strings.Join(plan.Errors, "; ")); err != nil {
 			return err
@@ -1100,6 +1120,13 @@ func actionableSummary(recommendation Recommendation) string {
 		return "-"
 	}
 	return fmt.Sprintf("%t", recommendation.Stability.Actionable)
+}
+
+func safetySummary(recommendation Recommendation) string {
+	if recommendation.Safety.Classification == "" {
+		return "-"
+	}
+	return recommendation.Safety.Classification
 }
 
 func replicaStabilitySummary(recommendation Recommendation) string {

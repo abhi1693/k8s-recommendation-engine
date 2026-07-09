@@ -41,10 +41,6 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 		Resource: fmt.Sprintf("%s/%s/%s", workload.TargetRef.Kind, profile.Spec.Namespace, workload.TargetRef.Name),
 		Blocked:  report.Recommendation.Blocked,
 	}
-	if plan.Blocked {
-		plan.BlockReasons = append([]string(nil), report.Recommendation.BlockReasons...)
-		return plan
-	}
 	if profile.Spec.Git.BasePath == "" {
 		plan.Errors = append(plan.Errors, "spec.git.basePath is required for patch planning")
 		return plan
@@ -65,6 +61,10 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 	}
 
 	plan.SourceFile = filepath.ToSlash(filepath.Join(basePath, sourceFile))
+	if plan.Blocked {
+		plan.BlockReasons = append([]string(nil), report.Recommendation.BlockReasons...)
+		return plan
+	}
 	sourcePath := filepath.Join(worktree, basePath, sourceFile)
 	sourceData, err := os.ReadFile(sourcePath)
 	if err != nil {

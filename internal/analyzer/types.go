@@ -181,6 +181,7 @@ type Recommendation struct {
 	CurrentMemoryRequest     string                   `json:"currentMemoryRequest,omitempty"`
 	RecommendedMemoryRequest string                   `json:"recommendedMemoryRequest,omitempty"`
 	Confidence               float64                  `json:"confidence"`
+	Safety                   SafetyAssessment         `json:"safety"`
 	Learning                 LearningEvidence         `json:"learning"`
 	ReplicaDecision          *ReplicaDecision         `json:"replicaDecision,omitempty"`
 	ReasonCodes              []string                 `json:"reasonCodes,omitempty"`
@@ -188,6 +189,19 @@ type Recommendation struct {
 	BlockReasons             []string                 `json:"blockReasons,omitempty"`
 	PatchPlan                *PatchPlan               `json:"patchPlan,omitempty"`
 	Stability                *RecommendationStability `json:"stability,omitempty"`
+}
+
+type SafetyAssessment struct {
+	Classification    string         `json:"classification"`
+	AutoCommitAllowed bool           `json:"autoCommitAllowed"`
+	Reasons           []string       `json:"reasons,omitempty"`
+	Factors           []SafetyFactor `json:"factors,omitempty"`
+}
+
+type SafetyFactor struct {
+	Name           string `json:"name"`
+	Classification string `json:"classification"`
+	Reason         string `json:"reason"`
 }
 
 type RecommendationStability struct {

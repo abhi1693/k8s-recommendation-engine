@@ -680,6 +680,53 @@ func TestProposalBatchResetsWindowWhenRecommendationChanges(t *testing.T) {
 	}
 }
 
+func TestProposalBatchBypassesWindowForUrgentTrafficScaleUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	report.Proposal = nil
+	workload := &report.Workloads[0]
+	workload.Recommendation.CurrentReplicas = 2
+	workload.Recommendation.RecommendedReplicas = 3
+	workload.Recommendation.PatchPlan.Changes = []analyzer.PatchChange{
+		{Field: "spec.replicas", Operation: "replace", Current: "2", Recommended: "3"},
+	}
+	workload.MetricSignals = []analyzer.SignalReport{
+		{Name: "request_rate", Anomaly: analyzer.AnomalyStatus{State: "critical", Reason: "spike"}},
+	}
+
+	if err := ApplyProposalBatch(context.Background(), path, report, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	plan := workload.Recommendation.PatchPlan
+	if plan == nil || plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want urgent bypass unblocked", plan)
+	}
+	if !contains(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly") {
+		t.Fatalf("missing urgent bypass reason: %#v", plan.BlockReasons)
+	}
+}
+
+func TestProposalBatchDoesNotBypassForAnomalousDecrease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	report.Proposal = nil
+	workload := &report.Workloads[0]
+	workload.MetricSignals = []analyzer.SignalReport{
+		{Name: "request_rate", Anomaly: analyzer.AnomalyStatus{State: "critical", Reason: "spike"}},
+	}
+
+	if err := ApplyProposalBatch(context.Background(), path, report, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	plan := workload.Recommendation.PatchPlan
+	if plan == nil || !plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want anomalous decrease to remain batched", plan)
+	}
+	if contains(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly") {
+		t.Fatalf("unexpected urgent bypass for decrease: %#v", plan.BlockReasons)
+	}
+}
+
 func TestSeasonalityPersistsHourlyBuckets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	base := time.Date(2026, 7, 7, 14, 0, 0, 0, time.UTC)

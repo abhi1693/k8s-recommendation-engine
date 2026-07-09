@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/abhi1693/k8s-recommendation-engine/internal/analyzer"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func ApplyProposalBudgets(ctx context.Context, path string, report *analyzer.Report, profile *config.ApplicationProfile) error {
@@ -97,6 +100,10 @@ func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report,
 		workload := &report.Workloads[index]
 		plan := workload.Recommendation.PatchPlan
 		if proposalEventPlan(plan) {
+			if urgentBatchBypass(report.SharedSignals, workload, plan) {
+				plan.BlockReasons = append(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly")
+				continue
+			}
 			firstSeen, err := s.upsertProposalBatchItem(ctx, report.Application, workload, plan, generatedAt)
 			if err != nil {
 				return err
@@ -315,5 +322,71 @@ func blockApplyablePlans(report *analyzer.Report, reason string) {
 		plan.Blocked = true
 		plan.Needed = false
 		plan.BlockReasons = append(plan.BlockReasons, reason)
+	}
+}
+
+func urgentBatchBypass(sharedSignals []analyzer.SignalReport, workload *analyzer.WorkloadReport, plan *analyzer.PatchPlan) bool {
+	if workload == nil || plan == nil || !hasTrafficAnomaly(workload.MetricSignals, sharedSignals) {
+		return false
+	}
+	for _, change := range plan.Changes {
+		if change.Current == change.Recommended {
+			continue
+		}
+		if change.Field == "spec.replicas" && numericIncrease(change.Current, change.Recommended) {
+			return true
+		}
+		if strings.HasSuffix(change.Field, ".resources.requests.cpu") && quantityIncrease(change.Current, change.Recommended) {
+			return true
+		}
+		if strings.HasSuffix(change.Field, ".resources.requests.memory") && quantityIncrease(change.Current, change.Recommended) {
+			return true
+		}
+	}
+	return false
+}
+
+func numericIncrease(current, recommended string) bool {
+	currentValue, err := strconv.ParseFloat(current, 64)
+	if err != nil {
+		return false
+	}
+	recommendedValue, err := strconv.ParseFloat(recommended, 64)
+	if err != nil {
+		return false
+	}
+	return recommendedValue > currentValue
+}
+
+func quantityIncrease(current, recommended string) bool {
+	currentQuantity, err := resource.ParseQuantity(current)
+	if err != nil {
+		return false
+	}
+	recommendedQuantity, err := resource.ParseQuantity(recommended)
+	if err != nil {
+		return false
+	}
+	return recommendedQuantity.AsApproximateFloat64() > currentQuantity.AsApproximateFloat64()
+}
+
+func hasTrafficAnomaly(workloadSignals, sharedSignals []analyzer.SignalReport) bool {
+	for _, signal := range append(append([]analyzer.SignalReport(nil), workloadSignals...), sharedSignals...) {
+		if !trafficBatchSignal(signal.Name) {
+			continue
+		}
+		if signal.Anomaly.State == "warning" || signal.Anomaly.State == "critical" {
+			return true
+		}
+	}
+	return false
+}
+
+func trafficBatchSignal(name string) bool {
+	switch name {
+	case "request_rate", "latency_p95", "error_rate", "concurrent_requests":
+		return true
+	default:
+		return false
 	}
 }

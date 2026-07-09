@@ -159,6 +159,8 @@ go run ./cmd/k8s-recommendation-engine run \
 
 Set `--proposal-batch-window 0` to restore immediate commit behavior. A non-zero batch window requires `--state-db` because the pending batch must survive reconcile loops and process restarts.
 
+The batch window is bypassed for urgent surge protection. If a workload or shared traffic signal has an active request-rate, latency, error-rate, or concurrency anomaly and the proposal increases replicas, CPU, or memory, the commit can be created immediately. Decreases never bypass the batch window.
+
 Before writing a proposal, the engine also checks the live Deployment rollout state. A proposal is blocked while the Deployment generation is still pending, updated/ready/available replicas have not caught up, unavailable replicas exist, or selected Pods are terminating, pending, unready, or have incomplete init containers. This prevents the controller from stacking new recommendations on top of an app that Fleet or Kubernetes has not finished applying yet.
 
 Every recommendation also gets a safety classification before any Git proposal is written:

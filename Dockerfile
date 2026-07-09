@@ -13,5 +13,5 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/k8s-recommendation-engine /usr/local/bin/k8s-recommendation-engine
-USER nonroot:nonroot
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/k8s-recommendation-engine"]

@@ -182,6 +182,7 @@ func runProposalObserve(args []string) error {
 	if err != nil {
 		return err
 	}
+	setReportRecommendationMode(report, options.mode)
 	if err := state.AttachAndRecord(ctx, options.stateDB, report); err != nil {
 		return err
 	}
@@ -310,6 +311,7 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 	if err != nil {
 		return err
 	}
+	setReportRecommendationMode(report, options.mode)
 	if err := state.AttachAndRecord(ctx, options.stateDB, report); err != nil {
 		return err
 	}
@@ -333,6 +335,18 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 		return analyzer.WriteTextReport(outputFile, report)
 	default:
 		return fmt.Errorf("unsupported output format %q", options.output)
+	}
+}
+
+func setReportRecommendationMode(report *analyzer.Report, mode string) {
+	if report == nil {
+		return
+	}
+	if mode == "" {
+		mode = "dry-run"
+	}
+	for index := range report.Workloads {
+		report.Workloads[index].Recommendation.Mode = mode
 	}
 }
 

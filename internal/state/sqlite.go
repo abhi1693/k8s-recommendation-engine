@@ -97,6 +97,7 @@ func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) er
 			}
 		}
 		workload.Recommendation.Stability = evaluateStability(workload, recentRuns)
+		applyOutcomeSafetyGate(workload.Recommendation.Stability, summary.LastOutcome)
 		if err := s.recordWorkload(ctx, report.Application, report.GeneratedAt, workload, currentForecastScores); err != nil {
 			return err
 		}
@@ -992,6 +993,36 @@ func evaluateStability(workload *analyzer.WorkloadReport, recent []priorRun) *an
 	}
 	stability.Actionable = gateActionable(stability.Replicas) && gateActionable(stability.CPU) && gateActionable(stability.Memory)
 	return stability
+}
+
+func applyOutcomeSafetyGate(stability *analyzer.RecommendationStability, outcome *analyzer.RecommendationOutcome) {
+	if stability == nil || outcome == nil {
+		return
+	}
+	reason := outcomeBlockReason(outcome.Status)
+	if reason == "" {
+		return
+	}
+	block := analyzer.StabilityGate{Status: "blocked", Reason: reason}
+	stability.Replicas = block
+	stability.CPU = block
+	stability.Memory = block
+	stability.Actionable = false
+}
+
+func outcomeBlockReason(status string) string {
+	switch status {
+	case "not_applied":
+		return "previous recommendation has not been applied yet"
+	case "partially_applied":
+		return "previous recommendation is only partially applied"
+	case "too_aggressive":
+		return "previous recommendation left the workload unhealthy"
+	case "too_conservative":
+		return "previous recommendation still needs post-apply observation before another change"
+	default:
+		return ""
+	}
 }
 
 type resourceKind string

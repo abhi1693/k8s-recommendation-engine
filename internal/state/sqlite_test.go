@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,29 @@ func TestAttachAndRecordPersistsPriorLearning(t *testing.T) {
 	}
 	if persistent.LastOutcome.Status != "dry_run_not_applied" {
 		t.Fatalf("LastOutcome.Status = %q, want dry_run_not_applied", persistent.LastOutcome.Status)
+	}
+}
+
+func TestAttachAndRecordClassifiesProposeNotApplied(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := testReport()
+	first.Workloads[0].Recommendation.Mode = "propose"
+	if err := AttachAndRecord(context.Background(), path, first); err != nil {
+		t.Fatal(err)
+	}
+
+	second := testReport()
+	second.Workloads[0].Recommendation.Mode = "propose"
+	if err := AttachAndRecord(context.Background(), path, second); err != nil {
+		t.Fatal(err)
+	}
+
+	persistent := second.Workloads[0].Recommendation.Learning.Persistent
+	if persistent == nil || persistent.LastOutcome == nil {
+		t.Fatal("second last outcome is nil")
+	}
+	if persistent.LastOutcome.Status != "not_applied" {
+		t.Fatalf("LastOutcome.Status = %q, want not_applied", persistent.LastOutcome.Status)
 	}
 }
 
@@ -253,6 +277,60 @@ func TestEvaluateStabilityBlocksMemoryDecreaseOnAnomaly(t *testing.T) {
 	}
 	if stability.Actionable {
 		t.Fatal("blocked memory gate should not be actionable")
+	}
+}
+
+func TestOutcomeSafetyGateBlocksUnsettledPriorRecommendation(t *testing.T) {
+	stability := &analyzer.RecommendationStability{
+		Actionable: true,
+		Replicas:   analyzer.StabilityGate{Status: "hold"},
+		CPU:        analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		Memory:     analyzer.StabilityGate{Status: "hold"},
+	}
+
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "partially_applied"})
+
+	if stability.Actionable {
+		t.Fatal("partially applied prior recommendation should block action")
+	}
+	if stability.CPU.Status != "blocked" || !strings.Contains(stability.CPU.Reason, "partially applied") {
+		t.Fatalf("CPU gate = %#v, want blocked by partially applied outcome", stability.CPU)
+	}
+}
+
+func TestOutcomeSafetyGateBlocksTooConservativePriorRecommendation(t *testing.T) {
+	stability := &analyzer.RecommendationStability{
+		Actionable: true,
+		Replicas:   analyzer.StabilityGate{Status: "hold"},
+		CPU:        analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		Memory:     analyzer.StabilityGate{Status: "hold"},
+	}
+
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "too_conservative"})
+
+	if stability.Actionable {
+		t.Fatal("too conservative prior recommendation should block action")
+	}
+	if stability.CPU.Status != "blocked" || !strings.Contains(stability.CPU.Reason, "post-apply observation") {
+		t.Fatalf("CPU gate = %#v, want blocked by post-apply observation", stability.CPU)
+	}
+}
+
+func TestOutcomeSafetyGateAllowsSuccessfulPriorRecommendation(t *testing.T) {
+	stability := &analyzer.RecommendationStability{
+		Actionable: true,
+		Replicas:   analyzer.StabilityGate{Status: "hold"},
+		CPU:        analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		Memory:     analyzer.StabilityGate{Status: "hold"},
+	}
+
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "applied_successful"})
+
+	if !stability.Actionable {
+		t.Fatal("successful prior recommendation should not block action")
+	}
+	if stability.CPU.Status != "stable" {
+		t.Fatalf("CPU gate = %#v, want unchanged stable gate", stability.CPU)
 	}
 }
 

@@ -239,6 +239,14 @@ func writeProposalCommit(ctx context.Context, worktree string, report *Report, p
 		proposal.BlockReasons = append(proposal.BlockReasons, reason)
 		return
 	}
+	if branchExists && currentBranch != branch {
+		if _, err := gitOutput(ctx, worktree, "switch", branch); err != nil {
+			proposal.Blocked = true
+			proposal.BlockReasons = append(proposal.BlockReasons, "could not switch to proposal branch "+branch+": "+err.Error())
+			return
+		}
+		currentBranch = branch
+	}
 	syncBranch := branch
 	if !branchExists {
 		syncBranch = currentBranch
@@ -246,19 +254,14 @@ func writeProposalCommit(ctx context.Context, worktree string, report *Report, p
 	if !ensureProposalRemoteFresh(ctx, worktree, proposal, options, syncBranch, false) {
 		return
 	}
+	if !refreshProposalAfterGitSync(worktree, report, proposal) {
+		return
+	}
 	if currentBranch != branch {
-		if branchExists {
-			if _, err := gitOutput(ctx, worktree, "switch", branch); err != nil {
-				proposal.Blocked = true
-				proposal.BlockReasons = append(proposal.BlockReasons, "could not switch to proposal branch "+branch+": "+err.Error())
-				return
-			}
-		} else {
-			if _, err := gitOutput(ctx, worktree, "switch", "-c", branch); err != nil {
-				proposal.Blocked = true
-				proposal.BlockReasons = append(proposal.BlockReasons, "could not create proposal branch "+branch+": "+err.Error())
-				return
-			}
+		if _, err := gitOutput(ctx, worktree, "switch", "-c", branch); err != nil {
+			proposal.Blocked = true
+			proposal.BlockReasons = append(proposal.BlockReasons, "could not create proposal branch "+branch+": "+err.Error())
+			return
 		}
 	}
 	proposal.Branch = branch
@@ -294,6 +297,23 @@ func writeProposalCommit(ctx context.Context, worktree string, report *Report, p
 		return
 	}
 	proposal.Message = "proposal branch and local commit created; nothing was pushed"
+}
+
+func refreshProposalAfterGitSync(worktree string, report *Report, proposal *ProposalReport) bool {
+	refreshed := BuildProposal(worktree, report)
+	if refreshed.Blocked {
+		proposal.Blocked = true
+		proposal.BlockReasons = append(proposal.BlockReasons, refreshed.BlockReasons...)
+		proposal.Errors = append(proposal.Errors, refreshed.Errors...)
+		return false
+	}
+	proposal.Needed = refreshed.Needed
+	proposal.Files = refreshed.Files
+	if !proposal.Needed {
+		proposal.Message = "proposal no longer needed after git sync"
+		return false
+	}
+	return true
 }
 
 func publishExistingProposalCommit(ctx context.Context, worktree string, proposal *ProposalReport, options ProposalOptions) {
@@ -491,9 +511,23 @@ func ensureProposalRemoteFresh(ctx context.Context, worktree string, proposal *P
 		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q has diverged from %s after fetch (ahead %d, behind %d); refusing to create another proposal commit on a stale base", branch, remoteRef, ahead, behind))
 		return false
 	case behind > 0:
-		proposal.Blocked = true
-		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q is behind %s by %d commit(s) after fetch; refusing to create proposal commit until the worktree is updated", branch, remoteRef, behind))
-		return false
+		if _, err := gitOutput(ctx, worktree, "pull", "--rebase", remote, branch); err != nil {
+			proposal.Blocked = true
+			proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q is behind %s by %d commit(s), and pull --rebase failed: %v", branch, remoteRef, behind, err))
+			return false
+		}
+		ahead, behind, err = gitAheadBehind(ctx, worktree, branch, remote)
+		if err != nil {
+			proposal.Errors = append(proposal.Errors, "read git ahead/behind state after pull --rebase: "+err.Error())
+			proposal.Blocked = true
+			return false
+		}
+		if behind > 0 || ahead > 0 && !allowAhead {
+			proposal.Blocked = true
+			proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q remains out of sync with %s after pull --rebase (ahead %d, behind %d)", branch, remoteRef, ahead, behind))
+			return false
+		}
+		return true
 	case ahead > 0 && !allowAhead:
 		proposal.Blocked = true
 		proposal.BlockReasons = append(proposal.BlockReasons, fmt.Sprintf("git branch %q already has %d unpushed commit(s) relative to %s; refusing to create another proposal commit", branch, ahead, remoteRef))

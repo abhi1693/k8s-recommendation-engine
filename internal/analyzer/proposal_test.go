@@ -259,7 +259,7 @@ spec: {}
 	}
 }
 
-func TestCreateProposalCommitBlocksWhenRemoteAdvanced(t *testing.T) {
+func TestCreateProposalCommitPullsRebaseWhenRemoteAdvanced(t *testing.T) {
 	worktree := initProposalGitRepo(t)
 	remote := initBareGitRepo(t)
 	gitTest(t, worktree, "remote", "add", "origin", remote)
@@ -278,7 +278,16 @@ spec: {}
 	other := cloneGitRepo(t, remote)
 	gitTest(t, other, "config", "user.name", "K8s Recommendation Engine Test")
 	gitTest(t, other, "config", "user.email", "k8s-recommendation-engine@example.invalid")
-	writeRepoFile(t, other, "other.yaml", "remote: advanced\n")
+	writeRepoFile(t, other, "app.yaml", `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipyardhq
+  namespace: shipyardhq
+  labels:
+    remote: advanced
+spec: {}
+`)
 	gitTest(t, other, "add", ".")
 	gitTest(t, other, "commit", "-m", "remote update")
 	gitTest(t, other, "push")
@@ -291,21 +300,22 @@ spec: {}
 		Push:                   true,
 		AllowDefaultBranchPush: true,
 	})
-	if !proposal.Blocked {
-		t.Fatalf("proposal should block stale local branch: %#v", proposal)
+	if proposal.Blocked {
+		t.Fatalf("proposal should pull --rebase stale local branch: %#v", proposal)
 	}
-	if len(proposal.BlockReasons) != 1 || !strings.Contains(proposal.BlockReasons[0], "behind origin/master") {
-		t.Fatalf("BlockReasons = %#v, want behind origin/master", proposal.BlockReasons)
+	if proposal.Commit == "" || !proposal.Pushed {
+		t.Fatalf("proposal should commit and push after pull --rebase: %#v", proposal)
 	}
-	if proposal.Commit != "" || proposal.Pushed {
-		t.Fatalf("blocked stale proposal should not commit or push: %#v", proposal)
+	remoteHead := strings.TrimSpace(gitBareTest(t, remote, "rev-parse", "--short", "master"))
+	if remoteHead != proposal.Commit {
+		t.Fatalf("remote master = %q, proposal commit = %q", remoteHead, proposal.Commit)
 	}
 	content, err := os.ReadFile(filepath.Join(worktree, "app.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(content), "replicas: 2") {
-		t.Fatalf("blocked stale proposal wrote manifest:\n%s", string(content))
+	if !strings.Contains(string(content), "remote: advanced") || !strings.Contains(string(content), "replicas: 2") {
+		t.Fatalf("proposal did not preserve remote update and apply recommendation:\n%s", string(content))
 	}
 }
 

@@ -135,8 +135,8 @@ func TestBuildRecommendationIncreasesReplicasOnSaturation(t *testing.T) {
 	if got.RecommendedReplicas != 4 {
 		t.Fatalf("RecommendedReplicas = %d, want 4", got.RecommendedReplicas)
 	}
-	if got.RecommendedCPURequest != "750m" {
-		t.Fatalf("RecommendedCPURequest = %q, want 750m", got.RecommendedCPURequest)
+	if got.RecommendedCPURequest != "740m" {
+		t.Fatalf("RecommendedCPURequest = %q, want 740m", got.RecommendedCPURequest)
 	}
 }
 
@@ -339,6 +339,54 @@ func TestBuildRecommendationHonorsPDBReplicaFloor(t *testing.T) {
 	got := buildRecommendation(workload, report, nil)
 	if got.RecommendedReplicas != 2 {
 		t.Fatalf("RecommendedReplicas = %d, want 2", got.RecommendedReplicas)
+	}
+}
+
+func TestBuildRecommendationPrefersFewerLargerPodsWhenTotalRequestIsLower(t *testing.T) {
+	report := WorkloadReport{
+		Replicas:      3,
+		ReadyReplicas: 3,
+		Containers: []ContainerReport{
+			{
+				Name:               "web",
+				CPURequest:         "240m",
+				CPURequestCores:    0.24,
+				MemoryRequest:      "4938Mi",
+				MemoryRequestBytes: 4938 * 1024 * 1024,
+			},
+		},
+		Availability: AvailabilityReport{
+			ReplicaFloor:                 2,
+			Public:                       true,
+			ReadyEndpoints:               3,
+			ReadyNodes:                   3,
+			RollingUpdateZeroUnavailable: true,
+		},
+		MetricsCondition: "healthy",
+		MetricSignals: []SignalReport{
+			sampleSignalWithHistory("available_replicas", 3, SignalHistory{Points: 73, P50: 2, P95: 3, Max: 3}),
+			sampleSignalWithHistory("request_rate", 1.84, SignalHistory{Points: 73, P50: 1.4, P95: 1.91, Max: 2.28}),
+			sampleSignalWithHistory("latency_p95", 0.48, SignalHistory{Points: 73, P50: 0.24, P95: 0.61, Max: 3.02}),
+			sampleSignalWithHistory("cpu_usage", 0.22, SignalHistory{Points: 73, P50: 0.14, P95: 0.25, Max: 0.70}),
+			sampleSignalWithHistory("memory_working_set", 1.72*1024*1024*1024, SignalHistory{Points: 73, P50: 3.71 * 1024 * 1024 * 1024, P95: 7.69 * 1024 * 1024 * 1024, Max: 8.48 * 1024 * 1024 * 1024}),
+		},
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{Replicas: true, CPU: true, Memory: true},
+		Bounds: config.BoundsSpec{
+			Replicas: config.ReplicaBounds{Min: 1, Max: 4},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.RecommendedReplicas != 2 {
+		t.Fatalf("RecommendedReplicas = %d, want 2; reasons=%#v", got.RecommendedReplicas, got.ReasonCodes)
+	}
+	if got.RecommendedMemoryRequest == "" || got.RecommendedMemoryRequest == "4938Mi" {
+		t.Fatalf("RecommendedMemoryRequest = %q, want per-pod memory adjustment", got.RecommendedMemoryRequest)
+	}
+	if !hasReasonPrefix(got, "replica_joint_optimizer_selected:replicas=2") {
+		t.Fatalf("ReasonCodes missing joint optimizer selection: %#v", got.ReasonCodes)
 	}
 }
 

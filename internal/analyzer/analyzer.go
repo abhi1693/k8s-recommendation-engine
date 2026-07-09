@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -445,12 +446,15 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 	memoryPolicy := learnedResourcePolicy(report.MetricSignals, "memory_working_set", memoryPolicyProfile(), workload.Bounds.Memory)
 
 	cpuDrivenReplicas := int32(0)
+	cpuForDecision := 0.0
+	hasCPUDecision := false
 	if hasCPU && container.CPURequestCores > 0 {
-		cpuForDecision := cpuUsage
+		cpuForDecision = cpuUsage
 		if history := signalHistory(report.MetricSignals, "cpu_usage"); history != nil {
 			cpuForDecision = math.Max(cpuForDecision, history.P95)
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("cpu_usage_p95_%s:%.4g", history.Window, history.P95))
 		}
+		hasCPUDecision = true
 		cpuUtilization := cpuForDecision / (container.CPURequestCores * replicas)
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("cpu_utilization:%.1f%%", cpuUtilization*100))
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, learnedPolicyReason("cpu_policy_learned", cpuPolicy))
@@ -478,12 +482,15 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 	}
 
 	memoryDrivenReplicas := int32(0)
+	memoryForDecision := 0.0
+	hasMemoryDecision := false
 	if hasMemory && container.MemoryRequestBytes > 0 {
-		memoryForDecision := memoryUsage
+		memoryForDecision = memoryUsage
 		if history := signalHistory(report.MetricSignals, "memory_working_set"); history != nil {
 			memoryForDecision = math.Max(memoryForDecision, history.P95)
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_working_set_p95_%s:%s", history.Window, formatBytes(history.P95)))
 		}
+		hasMemoryDecision = true
 		memoryUtilization := memoryForDecision / (container.MemoryRequestBytes * replicas)
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_utilization:%.1f%%", memoryUtilization*100))
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, learnedPolicyReason("memory_policy_learned", memoryPolicy))
@@ -520,7 +527,6 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 			fmt.Sprintf("traffic_replicas:%d", trafficDecision.Replicas),
 		)
 	}
-	recommendation.Learning = buildLearningEvidence(workload, report, recommendation, trafficDecision, cpuDrivenReplicas, memoryDrivenReplicas)
 
 	if workload.Scaling.Replicas {
 		pdbFloor := pdbReplicaFloor(report.PDBs)
@@ -534,10 +540,32 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 				recommendation.ReasonCodes = append(recommendation.ReasonCodes, "availability_floor_reasons:"+strings.Join(report.Availability.Reasons, ","))
 			}
 		}
-		rawReplicas := maxInt32(trafficDecision.Replicas, cpuDrivenReplicas, memoryDrivenReplicas, int32(workload.Bounds.Replicas.Min), pdbFloor, availabilityFloor, 1)
+		trafficFloor := int32(0)
+		if trafficDecision.ScaleUpAllowed {
+			trafficFloor = trafficDecision.Replicas
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("traffic_replica_floor:%d", trafficFloor))
+		} else if trafficDecision.Replicas > 0 {
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("traffic_hold_reference:%d", trafficDecision.Replicas))
+		}
+		rawReplicas := maxInt32(trafficFloor, replicaFloorForResource(workload.Scaling.CPU, cpuDrivenReplicas), replicaFloorForResource(workload.Scaling.Memory, memoryDrivenReplicas), int32(workload.Bounds.Replicas.Min), pdbFloor, availabilityFloor, 1)
 		if workload.Bounds.Replicas.Max > 0 && rawReplicas > int32(workload.Bounds.Replicas.Max) {
 			rawReplicas = int32(workload.Bounds.Replicas.Max)
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_recommendation_clamped_to_max")
+		}
+		capacityCeiling := maxInt32(rawReplicas, trafficDecision.Replicas, cpuDrivenReplicas, memoryDrivenReplicas, report.Replicas)
+		if plan, ok := optimizeReplicaResourcePlan(workload, report, container, rawReplicas, capacityCeiling, cpuPolicy, memoryPolicy, hasCPUDecision, cpuForDecision, resourceDownscaleAllowed(report.MetricSignals, "cpu_usage"), hasMemoryDecision, memoryForDecision, resourceDownscaleAllowed(report.MetricSignals, "memory_working_set")); ok {
+			rawReplicas = plan.Replicas
+			if workload.Scaling.CPU && plan.CPURequest != "" {
+				recommendation.RecommendedCPURequest = plan.CPURequest
+			}
+			if workload.Scaling.Memory && plan.MemoryRequest != "" {
+				recommendation.RecommendedMemoryRequest = plan.MemoryRequest
+			}
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes,
+				fmt.Sprintf("replica_joint_optimizer_selected:replicas=%d,total_cpu=%.4g,total_memory=%s", plan.Replicas, plan.TotalCPUCores, formatBytes(plan.TotalMemoryBytes)),
+			)
+			replaceJointResourceReason(&recommendation, "cpu", recommendation.CurrentCPURequest, recommendation.RecommendedCPURequest)
+			replaceJointResourceReason(&recommendation, "memory", recommendation.CurrentMemoryRequest, recommendation.RecommendedMemoryRequest)
 		}
 		if rawReplicas < report.Replicas {
 			if reason := replicaDownscaleBlockReason(report, sharedSignals); reason != "" {
@@ -550,15 +578,183 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 		recommendation.RecommendedReplicas = rawReplicas
 		if rawReplicas > report.Replicas {
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_scale_up_recommended")
-		} else {
+		} else if rawReplicas == report.Replicas {
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_count_hold")
 		}
 	} else {
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_management_disabled")
 	}
 
+	recommendation.Learning = buildLearningEvidence(workload, report, recommendation, trafficDecision, cpuDrivenReplicas, memoryDrivenReplicas)
 	recommendation.Confidence = recommendationConfidence(report, hasCPU, hasMemory, hasRequestRate)
 	return recommendation
+}
+
+func replicaFloorForResource(managed bool, replicas int32) int32 {
+	if managed {
+		return 0
+	}
+	return replicas
+}
+
+type replicaResourcePlan struct {
+	Replicas         int32
+	CPURequest       string
+	MemoryRequest    string
+	TotalCPUCores    float64
+	TotalMemoryBytes float64
+	Score            float64
+}
+
+func optimizeReplicaResourcePlan(workload config.WorkloadSpec, report WorkloadReport, container ContainerReport, floor, ceiling int32, cpuPolicy, memoryPolicy resourcePolicy, hasCPU bool, cpuDemand float64, canDecreaseCPU bool, hasMemory bool, memoryDemand float64, canDecreaseMemory bool) (replicaResourcePlan, bool) {
+	if floor < 1 {
+		floor = 1
+	}
+	ceiling = maxInt32(floor, ceiling, report.Replicas)
+	if workload.Bounds.Replicas.Max > 0 && ceiling > int32(workload.Bounds.Replicas.Max) {
+		ceiling = int32(workload.Bounds.Replicas.Max)
+	}
+
+	currentTotalCPU := container.CPURequestCores * float64(maxInt32(report.Replicas, 1))
+	currentTotalMemory := container.MemoryRequestBytes * float64(maxInt32(report.Replicas, 1))
+	var best replicaResourcePlan
+	for replicas := floor; replicas <= ceiling; replicas++ {
+		plan, ok := candidateReplicaResourcePlan(workload, container, replicas, cpuPolicy, memoryPolicy, hasCPU, cpuDemand, canDecreaseCPU, hasMemory, memoryDemand, canDecreaseMemory, currentTotalCPU, currentTotalMemory)
+		if !ok {
+			continue
+		}
+		if best.Replicas == 0 || plan.Score < best.Score {
+			best = plan
+		}
+	}
+	return best, best.Replicas > 0
+}
+
+func candidateReplicaResourcePlan(workload config.WorkloadSpec, container ContainerReport, replicas int32, cpuPolicy, memoryPolicy resourcePolicy, hasCPU bool, cpuDemand float64, canDecreaseCPU bool, hasMemory bool, memoryDemand float64, canDecreaseMemory bool, currentTotalCPU, currentTotalMemory float64) (replicaResourcePlan, bool) {
+	plan := replicaResourcePlan{Replicas: replicas}
+	replicaCount := float64(maxInt32(replicas, 1))
+
+	cpuCores := container.CPURequestCores
+	plan.CPURequest = container.CPURequest
+	if hasCPU && cpuDemand > 0 && cpuPolicy.TargetUtilization > 0 && container.CPURequestCores > 0 {
+		targetCPU := cpuDemand / (replicaCount * cpuPolicy.TargetUtilization)
+		if workload.Scaling.CPU {
+			if targetCPU < container.CPURequestCores && !canDecreaseCPU {
+				plan.CPURequest = container.CPURequest
+			} else {
+				plan.CPURequest = boundedCPURequest(container.CPURequestCores, targetCPU, cpuPolicy.MaxIncreasePercent, cpuPolicy.MaxDecreasePercent)
+				parsedCPU, ok := cpuRequestCores(plan.CPURequest)
+				if !ok || parsedCPU*replicaCount*cpuPolicy.TargetUtilization < cpuDemand*0.99 {
+					return replicaResourcePlan{}, false
+				}
+				cpuCores = parsedCPU
+			}
+		} else if container.CPURequestCores*replicaCount*cpuPolicy.TargetUtilization < cpuDemand*0.99 {
+			return replicaResourcePlan{}, false
+		}
+	}
+
+	memoryBytes := container.MemoryRequestBytes
+	plan.MemoryRequest = container.MemoryRequest
+	if hasMemory && memoryDemand > 0 && memoryPolicy.TargetUtilization > 0 && container.MemoryRequestBytes > 0 {
+		targetMemory := memoryDemand / (replicaCount * memoryPolicy.TargetUtilization)
+		if workload.Scaling.Memory {
+			if targetMemory < container.MemoryRequestBytes && !canDecreaseMemory {
+				plan.MemoryRequest = container.MemoryRequest
+			} else {
+				plan.MemoryRequest = boundedMemoryRequest(container.MemoryRequestBytes, targetMemory, memoryPolicy.MaxIncreasePercent, memoryPolicy.MaxDecreasePercent)
+				parsedMemory, ok := memoryRequestBytes(plan.MemoryRequest)
+				if !ok || parsedMemory*replicaCount*memoryPolicy.TargetUtilization < memoryDemand*0.99 {
+					return replicaResourcePlan{}, false
+				}
+				memoryBytes = parsedMemory
+			}
+		} else if container.MemoryRequestBytes*replicaCount*memoryPolicy.TargetUtilization < memoryDemand*0.99 {
+			return replicaResourcePlan{}, false
+		}
+	}
+
+	plan.TotalCPUCores = cpuCores * replicaCount
+	plan.TotalMemoryBytes = memoryBytes * replicaCount
+	cpuScore := normalizedResourceScore(plan.TotalCPUCores, currentTotalCPU)
+	memoryScore := normalizedResourceScore(plan.TotalMemoryBytes, currentTotalMemory)
+	plan.Score = cpuScore + memoryScore + (float64(replicas) * 0.02)
+	return plan, true
+}
+
+func normalizedResourceScore(value, baseline float64) float64 {
+	if baseline <= 0 {
+		return 0
+	}
+	return value / baseline
+}
+
+func cpuRequestCores(value string) (float64, bool) {
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0, false
+	}
+	return float64(quantity.MilliValue()) / 1000, true
+}
+
+func memoryRequestBytes(value string) (float64, bool) {
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0, false
+	}
+	return float64(quantity.Value()), true
+}
+
+func replaceJointResourceReason(recommendation *Recommendation, resourceName, current, recommended string) {
+	recommendation.ReasonCodes = withoutResourceRequestReasons(recommendation.ReasonCodes, resourceName)
+	if current == "" || recommended == "" || current == recommended {
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, resourceName+"_request_hold")
+		return
+	}
+	currentValue, currentOK := comparableResourceValue(resourceName, current)
+	recommendedValue, recommendedOK := comparableResourceValue(resourceName, recommended)
+	if !currentOK || !recommendedOK {
+		return
+	}
+	switch {
+	case recommendedValue > currentValue:
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, resourceName+"_request_increase_recommended_by_joint_optimizer")
+	case recommendedValue < currentValue:
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, resourceName+"_request_decrease_recommended_by_joint_optimizer")
+	}
+}
+
+func withoutResourceRequestReasons(reasons []string, resourceName string) []string {
+	filtered := reasons[:0]
+	for _, reason := range reasons {
+		if strings.HasPrefix(reason, resourceName+"_request_increase_recommended") ||
+			strings.HasPrefix(reason, resourceName+"_request_decrease_recommended") ||
+			strings.HasPrefix(reason, resourceName+"_request_hold") {
+			continue
+		}
+		filtered = append(filtered, reason)
+	}
+	return filtered
+}
+
+func reasonWithPrefix(recommendation Recommendation, prefix string) string {
+	for _, reason := range recommendation.ReasonCodes {
+		if strings.HasPrefix(reason, prefix) {
+			return reason
+		}
+	}
+	return ""
+}
+
+func comparableResourceValue(resourceName, value string) (float64, bool) {
+	switch resourceName {
+	case "cpu":
+		return cpuRequestCores(value)
+	case "memory":
+		return memoryRequestBytes(value)
+	default:
+		return 0, false
+	}
 }
 
 func pdbReplicaFloor(pdbs []PDBReport) int32 {
@@ -584,7 +780,10 @@ func buildLearningEvidence(workload config.WorkloadSpec, report WorkloadReport, 
 	if workload.Scaling.Replicas && traffic.Replicas > 0 {
 		conclusion := fmt.Sprintf("traffic needs %d replica(s)", traffic.Replicas)
 		if !traffic.ScaleUpAllowed && traffic.Replicas >= report.Replicas {
-			conclusion = fmt.Sprintf("traffic is inside learned envelope; hold at %d replica(s)", report.Replicas)
+			conclusion = fmt.Sprintf("traffic is inside learned envelope; use %d replica(s) as a hold reference, not a scale-up floor", report.Replicas)
+			if recommendation.RecommendedReplicas < report.Replicas {
+				conclusion = "traffic is inside learned envelope; resource optimizer may choose fewer replicas when learned p95 demand still fits"
+			}
 		}
 		evidence.Decisions = append(evidence.Decisions, LearnedDecision{
 			Subject:    "replicas.traffic",
@@ -616,6 +815,16 @@ func buildLearningEvidence(workload config.WorkloadSpec, report WorkloadReport, 
 			Observed:   availabilityObserved(report.Availability),
 			Conclusion: fmt.Sprintf("availability requires at least %d replica(s)", report.Availability.ReplicaFloor),
 		})
+	}
+	if workload.Scaling.Replicas {
+		if reason := reasonWithPrefix(recommendation, "replica_joint_optimizer_selected:"); reason != "" {
+			evidence.Decisions = append(evidence.Decisions, LearnedDecision{
+				Subject:    "replicas.resource_optimizer",
+				Learned:    "candidate replica counts are compared with the per-pod CPU and memory request needed to cover learned p95 demand",
+				Observed:   strings.TrimPrefix(reason, "replica_joint_optimizer_selected:"),
+				Conclusion: "choose the lowest safe total requested resource plan after availability, traffic, and guardrail floors",
+			})
+		}
 	}
 	if !workload.Scaling.Replicas {
 		evidence.Decisions = append(evidence.Decisions, LearnedDecision{

@@ -839,9 +839,12 @@ func replicaBasis(recommendation Recommendation) string {
 	if hasReasonPrefix(recommendation, "replica_management_disabled") {
 		return "disabled"
 	}
+	if hasReasonPrefix(recommendation, "replica_joint_optimizer_selected:") {
+		return "cost optimizer"
+	}
 	if recommendation.RecommendedReplicas > recommendation.CurrentReplicas {
 		switch {
-		case reasonInt(recommendation, "traffic_replicas:") >= recommendation.RecommendedReplicas:
+		case reasonInt(recommendation, "traffic_replica_floor:") >= recommendation.RecommendedReplicas:
 			return "traffic"
 		case reasonInt(recommendation, "cpu_replicas:") >= recommendation.RecommendedReplicas && reasonInt(recommendation, "memory_replicas:") >= recommendation.RecommendedReplicas:
 			return "learned cpu+memory pressure"
@@ -858,7 +861,7 @@ func replicaBasis(recommendation Recommendation) string {
 		}
 	}
 	switch {
-	case hasReasonPrefix(recommendation, "traffic_replicas:"):
+	case reasonInt(recommendation, "traffic_replica_floor:") >= recommendation.RecommendedReplicas:
 		return "traffic"
 	case recommendation.RecommendedReplicas == reasonInt(recommendation, "pdb_replica_floor:"):
 		return "pdb floor"

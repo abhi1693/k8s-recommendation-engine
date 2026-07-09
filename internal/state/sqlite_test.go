@@ -75,6 +75,33 @@ func TestAttachAndRecordClassifiesProposeNotApplied(t *testing.T) {
 	}
 }
 
+func TestAttachAndRecordDoesNotBlockProposeAfterDryRunHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := testReport()
+	first.Workloads[0].Recommendation.Mode = "dry-run"
+	if err := AttachAndRecord(context.Background(), path, first); err != nil {
+		t.Fatal(err)
+	}
+
+	second := testReport()
+	second.Workloads[0].Recommendation.Mode = "propose"
+	if err := AttachAndRecord(context.Background(), path, second); err != nil {
+		t.Fatal(err)
+	}
+
+	stability := second.Workloads[0].Recommendation.Stability
+	if stability == nil {
+		t.Fatal("stability is nil")
+	}
+	if stability.CPU.Status == "blocked" {
+		t.Fatalf("CPU gate should not be blocked by dry-run history after switching to propose: %#v", stability.CPU)
+	}
+	if second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome == nil ||
+		second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome.Status != "dry_run_not_applied" {
+		t.Fatalf("last outcome = %#v, want dry_run_not_applied", second.Workloads[0].Recommendation.Learning.Persistent.LastOutcome)
+	}
+}
+
 func TestAttachAndRecordSanitizesNonFiniteLearnedSignals(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	report := testReport()
@@ -288,7 +315,7 @@ func TestOutcomeSafetyGateBlocksUnsettledPriorRecommendation(t *testing.T) {
 		Memory:     analyzer.StabilityGate{Status: "hold"},
 	}
 
-	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "partially_applied"})
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "partially_applied"}, "propose")
 
 	if stability.Actionable {
 		t.Fatal("partially applied prior recommendation should block action")
@@ -306,13 +333,31 @@ func TestOutcomeSafetyGateBlocksDryRunRecommendationWithExplicitReason(t *testin
 		Memory:     analyzer.StabilityGate{Status: "hold"},
 	}
 
-	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "dry_run_not_applied"})
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "dry_run_not_applied"}, "dry-run")
 
 	if stability.Actionable {
 		t.Fatal("dry-run prior recommendation should block action")
 	}
 	if stability.Replicas.Status != "blocked" || stability.Replicas.Reason != "previous dry-run recommendation not applied" {
 		t.Fatalf("replica gate = %#v, want blocked by dry-run outcome", stability.Replicas)
+	}
+}
+
+func TestOutcomeSafetyGateAllowsProposeAfterDryRunRecommendation(t *testing.T) {
+	stability := &analyzer.RecommendationStability{
+		Actionable: true,
+		Replicas:   analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		CPU:        analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		Memory:     analyzer.StabilityGate{Status: "hold"},
+	}
+
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "dry_run_not_applied"}, "propose")
+
+	if !stability.Actionable {
+		t.Fatal("dry-run prior recommendation should not block propose mode")
+	}
+	if stability.Replicas.Status == "blocked" {
+		t.Fatalf("replica gate = %#v, should not be blocked", stability.Replicas)
 	}
 }
 
@@ -324,7 +369,7 @@ func TestOutcomeSafetyGateBlocksTooConservativePriorRecommendation(t *testing.T)
 		Memory:     analyzer.StabilityGate{Status: "hold"},
 	}
 
-	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "too_conservative"})
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "too_conservative"}, "propose")
 
 	if stability.Actionable {
 		t.Fatal("too conservative prior recommendation should block action")
@@ -342,7 +387,7 @@ func TestOutcomeSafetyGateAllowsSuccessfulPriorRecommendation(t *testing.T) {
 		Memory:     analyzer.StabilityGate{Status: "hold"},
 	}
 
-	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "applied_successful"})
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "applied_successful"}, "propose")
 
 	if !stability.Actionable {
 		t.Fatal("successful prior recommendation should not block action")

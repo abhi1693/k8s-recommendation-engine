@@ -97,7 +97,7 @@ func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) er
 			}
 		}
 		workload.Recommendation.Stability = evaluateStability(workload, recentRuns)
-		applyOutcomeSafetyGate(workload.Recommendation.Stability, summary.LastOutcome)
+		applyOutcomeSafetyGate(workload.Recommendation.Stability, summary.LastOutcome, workload.Recommendation.Mode)
 		if err := s.recordWorkload(ctx, report.Application, report.GeneratedAt, workload, currentForecastScores); err != nil {
 			return err
 		}
@@ -123,6 +123,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			recommended_memory_request TEXT NOT NULL,
 			confidence REAL NOT NULL,
 			blocked INTEGER NOT NULL,
+			recommendation_mode TEXT NOT NULL DEFAULT '',
 			reason_codes_json TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_workload_runs_lookup
@@ -195,6 +196,38 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate state db: %w", err)
 		}
+	}
+	if err := s.ensureColumn(ctx, "workload_runs", "recommendation_mode", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return fmt.Errorf("inspect table %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan table %s columns: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
 }
@@ -286,10 +319,11 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 			current_cpu_request,
 			recommended_cpu_request,
 			current_memory_request,
-			recommended_memory_request,
-			confidence,
-			reason_codes_json
-		FROM workload_runs
+				recommended_memory_request,
+				confidence,
+				recommendation_mode,
+				reason_codes_json
+			FROM workload_runs
 		WHERE application = ? AND namespace = ? AND workload_name = ?
 		ORDER BY generated_at DESC, id DESC
 		LIMIT 1
@@ -306,6 +340,7 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 		&previous.CurrentMemoryRequest,
 		&previous.RecommendedMemoryRequest,
 		&previous.Confidence,
+		&previous.Mode,
 		&reasonCodesJSON,
 	)
 	if err == nil {
@@ -336,10 +371,11 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 			current_cpu_request,
 			recommended_cpu_request,
 			current_memory_request,
-			recommended_memory_request,
-			confidence,
-			reason_codes_json
-		FROM workload_runs
+				recommended_memory_request,
+				confidence,
+				recommendation_mode,
+				reason_codes_json
+			FROM workload_runs
 		WHERE application = ? AND namespace = ? AND workload_name = ?
 		ORDER BY generated_at DESC, id DESC
 		LIMIT ?
@@ -362,6 +398,7 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 			&run.CurrentMemoryRequest,
 			&run.RecommendedMemoryRequest,
 			&run.Confidence,
+			&run.Mode,
 			&reasonCodesJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan recent persisted run: %w", err)
@@ -380,6 +417,7 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 
 type priorRun struct {
 	GeneratedAt              *time.Time
+	Mode                     string
 	CurrentReplicas          int32
 	RecommendedReplicas      int32
 	CurrentCPURequest        string
@@ -804,7 +842,7 @@ func classifyOutcome(previous priorRun, current *analyzer.WorkloadReport) *analy
 
 	switch {
 	case applied == 0:
-		if current.Recommendation.Mode == "dry-run" {
+		if previous.recommendationMode() == "dry-run" {
 			outcome.Status = "dry_run_not_applied"
 			outcome.Details = append(outcome.Details, "controller_is_not_writing_git_or_patching_kubernetes")
 		} else {
@@ -822,6 +860,13 @@ func classifyOutcome(previous priorRun, current *analyzer.WorkloadReport) *analy
 		outcome.Status = "applied_successful"
 	}
 	return outcome
+}
+
+func (run priorRun) recommendationMode() string {
+	if strings.TrimSpace(run.Mode) == "" {
+		return "dry-run"
+	}
+	return run.Mode
 }
 
 func workloadUnhealthy(workload *analyzer.WorkloadReport) bool {
@@ -995,8 +1040,11 @@ func evaluateStability(workload *analyzer.WorkloadReport, recent []priorRun) *an
 	return stability
 }
 
-func applyOutcomeSafetyGate(stability *analyzer.RecommendationStability, outcome *analyzer.RecommendationOutcome) {
+func applyOutcomeSafetyGate(stability *analyzer.RecommendationStability, outcome *analyzer.RecommendationOutcome, currentMode string) {
 	if stability == nil || outcome == nil {
+		return
+	}
+	if outcome.Status == "dry_run_not_applied" && currentMode != "dry-run" {
 		return
 	}
 	reason := outcomeBlockReason(outcome.Status)
@@ -1159,10 +1207,11 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 			recommended_cpu_request,
 			current_memory_request,
 			recommended_memory_request,
-			confidence,
-			blocked,
-			reason_codes_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				confidence,
+				blocked,
+				recommendation_mode,
+				reason_codes_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		application,
 		workload.Namespace,
@@ -1177,6 +1226,7 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 		workload.Recommendation.RecommendedMemoryRequest,
 		workload.Recommendation.Confidence,
 		boolInt(workload.Recommendation.Blocked),
+		workload.Recommendation.Mode,
 		string(reasons),
 	)
 	if err != nil {

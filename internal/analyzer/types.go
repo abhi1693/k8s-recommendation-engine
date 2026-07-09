@@ -414,6 +414,18 @@ type ObservationReport struct {
 	Errors      []string              `json:"errors,omitempty"`
 }
 
+type AutoRollbackReport struct {
+	Application string             `json:"application"`
+	Namespace   string             `json:"namespace"`
+	GeneratedAt time.Time          `json:"generatedAt"`
+	Needed      bool               `json:"needed"`
+	Blocked     bool               `json:"blocked"`
+	Reasons     []string           `json:"reasons,omitempty"`
+	Errors      []string           `json:"errors,omitempty"`
+	Observation *ObservationReport `json:"observation,omitempty"`
+	Rollback    *ProposalReport    `json:"rollback,omitempty"`
+}
+
 type GitObservation struct {
 	Worktree              string   `json:"worktree"`
 	Branch                string   `json:"branch"`

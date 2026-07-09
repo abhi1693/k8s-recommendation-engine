@@ -249,6 +249,23 @@ go run ./cmd/k8s-recommendation-engine proposal rollback \
 
 Rollback uses `git revert --no-edit HEAD`; it does not reset history.
 
+Automatically roll back the latest proposal only after Fleet has applied it and the applied workload is now regressed or unsafe:
+
+```bash
+go run ./cmd/k8s-recommendation-engine proposal auto-rollback \
+  --config configs/shipyard-profile.yaml \
+  --prometheus-url http://127.0.0.1:9090 \
+  --history-window 6h \
+  --history-step 5m \
+  --state-db .state/k8s-recommendation-engine.db \
+  --git-worktree /path/to/home-lab \
+  --branch master \
+  --push \
+  --allow-default-branch-push
+```
+
+Auto rollback first runs live analysis and convergence observation. It only creates a rollback commit when Git desired state matches the live Deployment and the observed outcome is `regressed` or `unsafe`. Pending Fleet convergence, drift, dirty Git worktrees, and missing proposal commits block automatic rollback.
+
 JSON output:
 
 ```bash

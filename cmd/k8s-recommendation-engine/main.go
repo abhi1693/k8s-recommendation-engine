@@ -76,6 +76,8 @@ func runProposal(args []string) error {
 		return runProposalRollback(args[1:])
 	case "observe":
 		return runProposalObserve(args[1:])
+	case "auto-rollback":
+		return runProposalAutoRollback(args[1:])
 	default:
 		return usage(fmt.Errorf("unknown proposal subcommand %q", args[0]))
 	}
@@ -157,6 +159,59 @@ func runProposalRollback(args []string) error {
 		AllowDefaultBranchPush: options.allowDefaultBranchPush,
 	})
 	return analyzer.WriteProposalResult(os.Stdout, report)
+}
+
+func runProposalAutoRollback(args []string) error {
+	fs := flag.NewFlagSet("proposal auto-rollback", flag.ExitOnError)
+	options := addCommonFlags(fs)
+	baseBranch := fs.String("base", "", "base branch used for Git comparison; defaults to spec.git.branch")
+	rollbackBranch := fs.String("branch", "", "rollback branch; defaults to spec.git.branch")
+	fs.StringVar(&options.proposalRemote, "remote", options.proposalRemote, "Git remote used when --push is set")
+	fs.BoolVar(&options.proposalPush, "push", options.proposalPush, "push rollback commit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), options.timeout)
+	defer cancel()
+
+	profile, err := config.LoadFile(options.configPath)
+	if err != nil {
+		return err
+	}
+	kubeClient, err := kube.NewClient(options.kubeconfig, options.contextName)
+	if err != nil {
+		return err
+	}
+	promClient := prom.NewClient(options.promURL, nil)
+	report, err := analyzer.New(kubeClient, promClient, analyzer.Options{
+		HistoryWindow: options.historyWindow,
+		HistoryStep:   options.historyStep,
+	}).Analyze(ctx, profile)
+	if err != nil {
+		return err
+	}
+	setReportRecommendationMode(report, options.mode)
+	if err := state.AttachAndRecord(ctx, options.stateDB, report); err != nil {
+		return err
+	}
+	analyzer.AttachSafetyAssessments(report)
+	observation := analyzer.ObserveConvergence(ctx, options.gitWorktree, *baseBranch, profile, report)
+	if err := state.RecordObservation(ctx, options.stateDB, observation); err != nil {
+		return err
+	}
+	autoRollback := analyzer.AutoRollback(ctx, options.gitWorktree, profile, report, observation, analyzer.RollbackOptions{
+		Branch:                 *rollbackBranch,
+		DefaultBranch:          profile.Spec.Git.Branch,
+		Remote:                 options.proposalRemote,
+		Push:                   options.proposalPush,
+		AllowDefaultBranchPush: options.allowDefaultBranchPush,
+	})
+	if options.output == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(autoRollback)
+	}
+	return analyzer.WriteAutoRollbackReport(os.Stdout, autoRollback)
 }
 
 func runProposalObserve(args []string) error {
@@ -468,6 +523,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal revert [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal rollback [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal observe [flags]")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal auto-rollback [flags]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Examples:")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine analyze --config configs/shipyard-profile.yaml --prometheus-url http://127.0.0.1:9090")
@@ -484,6 +540,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal revert --git-worktree /path/to/fleet")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal rollback --git-worktree /path/to/fleet --branch master --push --allow-default-branch-push")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal observe --config configs/shipyard-profile.yaml --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal auto-rollback --config configs/shipyard-profile.yaml --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet --branch master --push --allow-default-branch-push")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine run --interval 5m --state-db .state/k8s-recommendation-engine.db --output summary")
 }
 

@@ -972,6 +972,11 @@ func gateSummary(gate StabilityGate) string {
 		return "-"
 	case "hold":
 		return "hold"
+	case "blocked":
+		if gate.Reason != "" {
+			return "blocked: " + gate.Reason
+		}
+		return "blocked"
 	default:
 		return gate.Status + " " + progress
 	}
@@ -999,6 +1004,12 @@ func gateProgress(gate StabilityGate) string {
 
 func formatGate(gate StabilityGate) string {
 	progress := gateProgress(gate)
+	if gate.Status == "blocked" {
+		if gate.Reason == "" {
+			return "blocked"
+		}
+		return "blocked: " + gate.Reason
+	}
 	if gate.Reason == "" {
 		return fmt.Sprintf("%s(%s)", gate.Status, progress)
 	}

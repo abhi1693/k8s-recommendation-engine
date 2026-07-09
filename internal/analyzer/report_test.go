@@ -210,6 +210,17 @@ func TestReplicaBasisUsesAvailabilityFloorForHoldAtFloor(t *testing.T) {
 	}
 }
 
+func TestGateSummaryBlockedIncludesReason(t *testing.T) {
+	gate := StabilityGate{Status: "blocked", Reason: "previous dry-run recommendation not applied"}
+
+	if got := gateSummary(gate); got != "blocked: previous dry-run recommendation not applied" {
+		t.Fatalf("gateSummary = %q", got)
+	}
+	if got := formatGate(gate); got != "blocked: previous dry-run recommendation not applied" {
+		t.Fatalf("formatGate = %q", got)
+	}
+}
+
 func TestWriteActionsReport(t *testing.T) {
 	report := &Report{
 		Application: "shipyard",

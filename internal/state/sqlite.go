@@ -1012,6 +1012,8 @@ func applyOutcomeSafetyGate(stability *analyzer.RecommendationStability, outcome
 
 func outcomeBlockReason(status string) string {
 	switch status {
+	case "dry_run_not_applied":
+		return "previous dry-run recommendation not applied"
 	case "not_applied":
 		return "previous recommendation has not been applied yet"
 	case "partially_applied":

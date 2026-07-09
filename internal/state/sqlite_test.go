@@ -298,6 +298,24 @@ func TestOutcomeSafetyGateBlocksUnsettledPriorRecommendation(t *testing.T) {
 	}
 }
 
+func TestOutcomeSafetyGateBlocksDryRunRecommendationWithExplicitReason(t *testing.T) {
+	stability := &analyzer.RecommendationStability{
+		Actionable: true,
+		Replicas:   analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		CPU:        analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		Memory:     analyzer.StabilityGate{Status: "hold"},
+	}
+
+	applyOutcomeSafetyGate(stability, &analyzer.RecommendationOutcome{Status: "dry_run_not_applied"})
+
+	if stability.Actionable {
+		t.Fatal("dry-run prior recommendation should block action")
+	}
+	if stability.Replicas.Status != "blocked" || stability.Replicas.Reason != "previous dry-run recommendation not applied" {
+		t.Fatalf("replica gate = %#v, want blocked by dry-run outcome", stability.Replicas)
+	}
+}
+
 func TestOutcomeSafetyGateBlocksTooConservativePriorRecommendation(t *testing.T) {
 	stability := &analyzer.RecommendationStability{
 		Actionable: true,

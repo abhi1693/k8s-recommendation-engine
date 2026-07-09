@@ -5,14 +5,49 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/abhi1693/k8s-recommendation-engine/internal/analyzer"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+type ProposalBatchStatusReport struct {
+	GeneratedAt time.Time                  `json:"generatedAt"`
+	BatchWindow string                     `json:"batchWindow"`
+	Items       []ProposalBatchStatusItem  `json:"items,omitempty"`
+	Summary     ProposalBatchStatusSummary `json:"summary"`
+	Errors      []string                   `json:"errors,omitempty"`
+}
+
+type ProposalBatchStatusSummary struct {
+	Total   int `json:"total"`
+	Waiting int `json:"waiting"`
+	Ready   int `json:"ready"`
+}
+
+type ProposalBatchStatusItem struct {
+	Application  string                 `json:"application"`
+	Namespace    string                 `json:"namespace"`
+	Workload     string                 `json:"workload"`
+	Deployment   string                 `json:"deployment"`
+	SourceFile   string                 `json:"sourceFile"`
+	Resource     string                 `json:"resource"`
+	FirstSeenAt  time.Time              `json:"firstSeenAt"`
+	LastSeenAt   time.Time              `json:"lastSeenAt"`
+	ReadyAt      time.Time              `json:"readyAt"`
+	Remaining    string                 `json:"remaining"`
+	Status       string                 `json:"status"`
+	Reason       string                 `json:"reason"`
+	Changes      []analyzer.PatchChange `json:"changes,omitempty"`
+	BlockReasons []string               `json:"blockReasons,omitempty"`
+	PlanErrors   []string               `json:"planErrors,omitempty"`
+	DecodeError  string                 `json:"decodeError,omitempty"`
+}
 
 func ApplyProposalBudgets(ctx context.Context, path string, report *analyzer.Report, profile *config.ApplicationProfile) error {
 	if path == "" || report == nil || profile == nil {
@@ -38,6 +73,15 @@ func RecordProposalEvents(ctx context.Context, path string, report *analyzer.Rep
 	return store.RecordProposalEvents(ctx, report)
 }
 
+func ProposalBatchStatus(ctx context.Context, path string, batchWindow time.Duration, now time.Time) (*ProposalBatchStatusReport, error) {
+	store, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	return store.ProposalBatchStatus(ctx, batchWindow, now)
+}
+
 func ApplyProposalBatch(ctx context.Context, path string, report *analyzer.Report, profile *config.ApplicationProfile, proposalKind string, batchWindow time.Duration) error {
 	if report == nil || proposalKind != "commit" || batchWindow <= 0 {
 		return nil
@@ -54,6 +98,198 @@ func ApplyProposalBatch(ctx context.Context, path string, report *analyzer.Repor
 	}
 	defer store.Close()
 	return store.ApplyProposalBatch(ctx, report, profile, batchWindow)
+}
+
+func (s *Store) ProposalBatchStatus(ctx context.Context, batchWindow time.Duration, now time.Time) (*ProposalBatchStatusReport, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	report := &ProposalBatchStatusReport{
+		GeneratedAt: now,
+		BatchWindow: batchWindow.String(),
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT application,
+			namespace,
+			workload_name,
+			deployment,
+			source_file,
+			resource,
+			patch_plan_json,
+			first_seen_at,
+			last_seen_at
+		FROM proposal_batch_items
+		ORDER BY application, namespace, workload_name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query proposal batch items: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var item ProposalBatchStatusItem
+		var planJSON, firstSeenRaw, lastSeenRaw string
+		if err := rows.Scan(
+			&item.Application,
+			&item.Namespace,
+			&item.Workload,
+			&item.Deployment,
+			&item.SourceFile,
+			&item.Resource,
+			&planJSON,
+			&firstSeenRaw,
+			&lastSeenRaw,
+		); err != nil {
+			return nil, fmt.Errorf("scan proposal batch item: %w", err)
+		}
+		firstSeen, err := time.Parse(time.RFC3339Nano, firstSeenRaw)
+		if err != nil {
+			item.DecodeError = "parse first_seen_at: " + err.Error()
+			report.Errors = append(report.Errors, item.Workload+": "+item.DecodeError)
+		}
+		lastSeen, err := time.Parse(time.RFC3339Nano, lastSeenRaw)
+		if err != nil {
+			item.DecodeError = "parse last_seen_at: " + err.Error()
+			report.Errors = append(report.Errors, item.Workload+": "+item.DecodeError)
+		}
+		item.FirstSeenAt = firstSeen
+		item.LastSeenAt = lastSeen
+		item.ReadyAt = firstSeen.Add(batchWindow)
+		if item.ReadyAt.After(now) {
+			item.Status = "waiting"
+			item.Remaining = item.ReadyAt.Sub(now).Round(time.Second).String()
+			item.Reason = fmt.Sprintf("proposal batch window open until %s", item.ReadyAt.Format(time.RFC3339))
+		} else {
+			item.Status = "ready"
+			item.Remaining = "0s"
+			item.Reason = "batch window elapsed; next propose reconcile can commit if recommendation still matches"
+		}
+
+		var plan analyzer.PatchPlan
+		if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+			item.DecodeError = "decode patch_plan_json: " + err.Error()
+			report.Errors = append(report.Errors, item.Workload+": "+item.DecodeError)
+		} else {
+			item.Changes = plan.Changes
+			item.BlockReasons = plan.BlockReasons
+			item.PlanErrors = plan.Errors
+		}
+		report.Items = append(report.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate proposal batch items: %w", err)
+	}
+	report.Summary.Total = len(report.Items)
+	for _, item := range report.Items {
+		switch item.Status {
+		case "ready":
+			report.Summary.Ready++
+		case "waiting":
+			report.Summary.Waiting++
+		}
+	}
+	return report, nil
+}
+
+func WriteProposalBatchStatus(w io.Writer, report *ProposalBatchStatusReport) error {
+	if report == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "K8s Recommendation Engine Proposal Batch"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "Generated: %s   Batch window: %s\n\n", report.GeneratedAt.Format(time.RFC3339), report.BatchWindow); err != nil {
+		return err
+	}
+	if len(report.Items) == 0 {
+		if _, err := fmt.Fprintln(w, "No pending batch items."); err != nil {
+			return err
+		}
+		return writeProposalBatchSummary(w, report)
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "WORKLOAD\tSTATUS\tFIRST SEEN\tREADY AT\tREMAINING\tCHANGES\tWHY"); err != nil {
+		return err
+	}
+	for _, item := range report.Items {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s/%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			item.Namespace,
+			item.Workload,
+			item.Status,
+			item.FirstSeenAt.Format(time.RFC3339),
+			item.ReadyAt.Format(time.RFC3339),
+			item.Remaining,
+			len(item.Changes),
+			item.Reason,
+		); err != nil {
+			return err
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	for _, item := range report.Items {
+		if _, err := fmt.Fprintf(w, "\n%s/%s\n", item.Namespace, item.Workload); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "  application: %s deployment=%s resource=%s\n", item.Application, item.Deployment, item.Resource); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "  source: %s last_seen=%s\n", item.SourceFile, item.LastSeenAt.Format(time.RFC3339)); err != nil {
+			return err
+		}
+		if len(item.BlockReasons) > 0 {
+			for _, reason := range item.BlockReasons {
+				if _, err := fmt.Fprintf(w, "  reason: %s\n", reason); err != nil {
+					return err
+				}
+			}
+		}
+		if item.DecodeError != "" {
+			if _, err := fmt.Fprintf(w, "  error: %s\n", item.DecodeError); err != nil {
+				return err
+			}
+		}
+		for _, errText := range item.PlanErrors {
+			if _, err := fmt.Fprintf(w, "  error: %s\n", errText); err != nil {
+				return err
+			}
+		}
+		if len(item.Changes) == 0 {
+			if _, err := fmt.Fprintln(w, "  changes: none"); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprintln(w, "  changes:"); err != nil {
+			return err
+		}
+		for _, change := range item.Changes {
+			if _, err := fmt.Fprintf(w, "    - %s %s: %s -> %s\n", change.Operation, change.Field, change.Current, change.Recommended); err != nil {
+				return err
+			}
+		}
+	}
+	return writeProposalBatchSummary(w, report)
+}
+
+func writeProposalBatchSummary(w io.Writer, report *ProposalBatchStatusReport) error {
+	if len(report.Errors) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		for _, errText := range report.Errors {
+			if _, err := fmt.Fprintf(w, "Error: %s\n", errText); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := fmt.Fprintf(w, "\nSummary: total=%d waiting=%d ready=%d\n", report.Summary.Total, report.Summary.Waiting, report.Summary.Ready)
+	return err
 }
 
 func (s *Store) ApplyProposalBudgets(ctx context.Context, report *analyzer.Report, profile *config.ApplicationProfile) error {

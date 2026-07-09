@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"path/filepath"
@@ -611,6 +612,61 @@ func TestProposalBatchBlocksUntilWindowElapses(t *testing.T) {
 	}
 	if !secondPlan.Needed {
 		t.Fatal("second PatchPlan.Needed = false, want true")
+	}
+}
+
+func TestProposalBatchStatusShowsWaitingAndReadyItems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	firstSeen := time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC)
+	report := testProposalReport(firstSeen)
+	report.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, report, nil, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	waiting, err := ProposalBatchStatus(context.Background(), path, 15*time.Minute, firstSeen.Add(5*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waiting.Summary.Total != 1 || waiting.Summary.Waiting != 1 || waiting.Summary.Ready != 0 {
+		t.Fatalf("waiting summary = %#v", waiting.Summary)
+	}
+	item := waiting.Items[0]
+	if item.Status != "waiting" {
+		t.Fatalf("item status = %s, want waiting", item.Status)
+	}
+	if item.ReadyAt != firstSeen.Add(15*time.Minute) {
+		t.Fatalf("ReadyAt = %s, want %s", item.ReadyAt, firstSeen.Add(15*time.Minute))
+	}
+	if item.Remaining != "10m0s" {
+		t.Fatalf("Remaining = %s, want 10m0s", item.Remaining)
+	}
+	if len(item.Changes) != 1 {
+		t.Fatalf("changes = %d, want 1", len(item.Changes))
+	}
+	if !strings.Contains(item.Reason, "proposal batch window open") {
+		t.Fatalf("reason = %q", item.Reason)
+	}
+
+	ready, err := ProposalBatchStatus(context.Background(), path, 15*time.Minute, firstSeen.Add(16*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Summary.Total != 1 || ready.Summary.Waiting != 0 || ready.Summary.Ready != 1 {
+		t.Fatalf("ready summary = %#v", ready.Summary)
+	}
+	if ready.Items[0].Status != "ready" {
+		t.Fatalf("item status = %s, want ready", ready.Items[0].Status)
+	}
+	var output bytes.Buffer
+	if err := WriteProposalBatchStatus(&output, waiting); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"Proposal Batch", "shipyardhq/web", "waiting", "700m -> 490m", "Summary: total=1 waiting=1 ready=0"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q:\n%s", want, text)
+		}
 	}
 }
 

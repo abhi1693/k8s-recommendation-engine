@@ -78,8 +78,22 @@ func runProposal(args []string) error {
 		return runProposalObserve(args[1:])
 	case "auto-rollback":
 		return runProposalAutoRollback(args[1:])
+	case "batch":
+		return runProposalBatch(args[1:])
 	default:
 		return usage(fmt.Errorf("unknown proposal subcommand %q", args[0]))
+	}
+}
+
+func runProposalBatch(args []string) error {
+	if len(args) < 1 {
+		return usage(errors.New("missing proposal batch subcommand"))
+	}
+	switch args[0] {
+	case "status":
+		return runProposalBatchStatus(args[1:])
+	default:
+		return usage(fmt.Errorf("unknown proposal batch subcommand %q", args[0]))
 	}
 }
 
@@ -159,6 +173,36 @@ func runProposalRollback(args []string) error {
 		AllowDefaultBranchPush: options.allowDefaultBranchPush,
 	})
 	return analyzer.WriteProposalResult(os.Stdout, report)
+}
+
+func runProposalBatchStatus(args []string) error {
+	fs := flag.NewFlagSet("proposal batch status", flag.ExitOnError)
+	stateDB := fs.String("state-db", "", "SQLite state database used for proposal batching")
+	batchWindow := fs.Duration("proposal-batch-window", 15*time.Minute, "stable recommendation batch window used by the controller")
+	output := fs.String("output", "text", "output format: text or json")
+	timeout := fs.Duration("timeout", 30*time.Second, "state DB query timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *batchWindow < 0 {
+		return fmt.Errorf("proposal-batch-window must be non-negative")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, err := state.ProposalBatchStatus(ctx, *stateDB, *batchWindow, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	switch *output {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	case "text", "":
+		return state.WriteProposalBatchStatus(os.Stdout, report)
+	default:
+		return fmt.Errorf("unsupported output format %q", *output)
+	}
 }
 
 func runProposalAutoRollback(args []string) error {
@@ -524,6 +568,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal rollback [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal observe [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal auto-rollback [flags]")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal batch status [flags]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Examples:")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine analyze --config configs/shipyard-profile.yaml --prometheus-url http://127.0.0.1:9090")
@@ -541,6 +586,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal rollback --git-worktree /path/to/fleet --branch master --push --allow-default-branch-push")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal observe --config configs/shipyard-profile.yaml --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal auto-rollback --config configs/shipyard-profile.yaml --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet --branch master --push --allow-default-branch-push")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal batch status --state-db .state/k8s-recommendation-engine.db --proposal-batch-window 15m")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine run --interval 5m --state-db .state/k8s-recommendation-engine.db --output summary")
 }
 

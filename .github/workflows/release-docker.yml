@@ -19,8 +19,8 @@ jobs:
       image: ghcr.io/abhi1693/k8s-recommendation-engine
       context: .
       file: Dockerfile
-      platforms: linux/amd64,linux/arm64
-      qemu: true
+      platforms: linux/arm64
+      qemu: false
       cache-scope: k8s-recommendation-engine
       tags: |
         type=semver,pattern={{version}}

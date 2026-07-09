@@ -1,7 +1,7 @@
 FROM golang:1.25 AS build
 
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH=arm64
 
 WORKDIR /src
 COPY go.mod go.sum ./

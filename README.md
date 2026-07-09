@@ -51,7 +51,7 @@ Each workload can set per-resource change bounds in its profile. `minChangePerce
 ```yaml
 bounds:
   cpu:
-    minChangePercent: 5
+    minChangePercent: 10
   memory:
     minChangePercent: 5
 ```

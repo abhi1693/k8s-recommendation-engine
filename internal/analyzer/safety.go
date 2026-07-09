@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+
+	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
 )
 
 const (
@@ -13,20 +15,31 @@ const (
 )
 
 func AttachSafetyAssessments(report *Report) {
+	AttachSafetyAssessmentsWithPolicy(report, nil)
+}
+
+func AttachSafetyAssessmentsWithPolicy(report *Report, profile *config.ApplicationProfile) {
 	if report == nil {
 		return
 	}
+	policies := workloadSafetyPolicies(profile)
 	for index := range report.Workloads {
 		workload := &report.Workloads[index]
 		workload.Recommendation.Safety = classifyRecommendationSafety(*workload, report.SharedSignals)
-		if workload.Recommendation.Safety.Classification == SafetyHighRisk {
-			reason := "safety classification high_risk blocks auto-commit"
+		policy := policies[workload.Name]
+		applySafetyPolicy(workload, policy)
+		if !workload.Recommendation.Safety.AutoCommitAllowed {
+			reason := safetyBlockReason(workload.Recommendation.Safety)
 			workload.Recommendation.Blocked = true
 			if !stringSliceContains(workload.Recommendation.BlockReasons, reason) {
 				workload.Recommendation.BlockReasons = append(workload.Recommendation.BlockReasons, reason)
 			}
-			if !stringSliceContains(workload.Recommendation.ReasonCodes, "safety_high_risk_auto_commit_blocked") {
-				workload.Recommendation.ReasonCodes = append(workload.Recommendation.ReasonCodes, "safety_high_risk_auto_commit_blocked")
+			code := "safety_auto_commit_blocked"
+			if workload.Recommendation.Safety.Classification == SafetyHighRisk {
+				code = "safety_high_risk_auto_commit_blocked"
+			}
+			if !stringSliceContains(workload.Recommendation.ReasonCodes, code) {
+				workload.Recommendation.ReasonCodes = append(workload.Recommendation.ReasonCodes, code)
 			}
 		}
 	}
@@ -65,6 +78,93 @@ func classifyRecommendationSafety(workload WorkloadReport, sharedSignals []Signa
 		Reasons:           reasons,
 		Factors:           factors,
 	}
+}
+
+func workloadSafetyPolicies(profile *config.ApplicationProfile) map[string]config.SafetyPolicySpec {
+	policies := map[string]config.SafetyPolicySpec{}
+	if profile == nil {
+		return policies
+	}
+	for _, workload := range profile.Spec.Workloads {
+		policies[workload.Name] = workload.Policy.Safety
+	}
+	return policies
+}
+
+func applySafetyPolicy(workload *WorkloadReport, policy config.SafetyPolicySpec) {
+	if workload == nil {
+		return
+	}
+	safety := &workload.Recommendation.Safety
+	allowed := policy.AllowAutoCommit
+	if len(allowed) == 0 {
+		allowed = []string{SafetyLowRisk, SafetyMediumRisk}
+	}
+	safety.AutoCommitAllowed = riskListContains(allowed, safety.Classification)
+	if !safety.AutoCommitAllowed {
+		safety.Reasons = appendSafetyReason(safety.Reasons, fmt.Sprintf("policy allowAutoCommit excludes %s", safety.Classification))
+	}
+
+	maxDecreaseRisk := policy.MaxDecreaseRisk
+	if maxDecreaseRisk == "" {
+		maxDecreaseRisk = SafetyHighRisk
+	}
+	if factor, ok := safetyFactorByName(safety.Factors, "resource_decrease_size"); ok && riskRank(factor.Classification) > riskRank(maxDecreaseRisk) {
+		safety.AutoCommitAllowed = false
+		safety.Reasons = appendSafetyReason(safety.Reasons, fmt.Sprintf("resource decrease risk %s exceeds policy maxDecreaseRisk %s", factor.Classification, maxDecreaseRisk))
+	}
+}
+
+func safetyBlockReason(safety SafetyAssessment) string {
+	if safety.Classification == SafetyHighRisk {
+		return "safety classification high_risk blocks auto-commit"
+	}
+	if len(safety.Reasons) > 0 {
+		for _, reason := range safety.Reasons {
+			if strings.Contains(reason, "policy allowAutoCommit") || strings.Contains(reason, "maxDecreaseRisk") {
+				return "safety policy blocks auto-commit: " + reason
+			}
+		}
+	}
+	return "safety policy blocks auto-commit"
+}
+
+func riskListContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func safetyFactorByName(factors []SafetyFactor, name string) (SafetyFactor, bool) {
+	for _, factor := range factors {
+		if factor.Name == name {
+			return factor, true
+		}
+	}
+	return SafetyFactor{}, false
+}
+
+func riskRank(risk string) int {
+	switch risk {
+	case SafetyLowRisk:
+		return 1
+	case SafetyMediumRisk:
+		return 2
+	case SafetyHighRisk:
+		return 3
+	default:
+		return 3
+	}
+}
+
+func appendSafetyReason(reasons []string, reason string) []string {
+	if !stringSliceContains(reasons, reason) {
+		reasons = append(reasons, reason)
+	}
+	return reasons
 }
 
 func resourceDecreaseSafety(workload WorkloadReport) SafetyFactor {

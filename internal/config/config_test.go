@@ -21,3 +21,38 @@ func TestRenderQueryMissingKey(t *testing.T) {
 		t.Fatalf("RenderQuery() expected missing key error")
 	}
 }
+
+func TestValidateRejectsUnsupportedSafetyRisk(t *testing.T) {
+	profile := validTestProfile()
+	profile.Spec.Workloads[0].Policy.Safety.AllowAutoCommit = []string{"low_risk", "unknown"}
+	if err := profile.Validate(); err == nil {
+		t.Fatal("Validate() expected unsupported allowAutoCommit risk error")
+	}
+}
+
+func TestValidateRejectsUnsupportedMaxDecreaseRisk(t *testing.T) {
+	profile := validTestProfile()
+	profile.Spec.Workloads[0].Policy.Safety.MaxDecreaseRisk = "unknown"
+	if err := profile.Validate(); err == nil {
+		t.Fatal("Validate() expected unsupported maxDecreaseRisk error")
+	}
+}
+
+func validTestProfile() *ApplicationProfile {
+	return &ApplicationProfile{
+		Metadata: Metadata{Name: "shipyard"},
+		Spec: ApplicationSpec{
+			Namespace: "shipyardhq",
+			Workloads: []WorkloadSpec{
+				{
+					Name:             "web",
+					TargetRef:        TargetRef{Kind: "Deployment", Name: "shipyardhq"},
+					MetricProfileRef: "http",
+				},
+			},
+		},
+		MetricProfiles: map[string]MetricProfile{
+			"http": {},
+		},
+	}
+}

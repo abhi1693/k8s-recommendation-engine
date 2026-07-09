@@ -38,7 +38,7 @@ func RecordProposalEvents(ctx context.Context, path string, report *analyzer.Rep
 	return store.RecordProposalEvents(ctx, report)
 }
 
-func ApplyProposalBatch(ctx context.Context, path string, report *analyzer.Report, proposalKind string, batchWindow time.Duration) error {
+func ApplyProposalBatch(ctx context.Context, path string, report *analyzer.Report, profile *config.ApplicationProfile, proposalKind string, batchWindow time.Duration) error {
 	if report == nil || proposalKind != "commit" || batchWindow <= 0 {
 		return nil
 	}
@@ -53,7 +53,7 @@ func ApplyProposalBatch(ctx context.Context, path string, report *analyzer.Repor
 		return err
 	}
 	defer store.Close()
-	return store.ApplyProposalBatch(ctx, report, batchWindow)
+	return store.ApplyProposalBatch(ctx, report, profile, batchWindow)
 }
 
 func (s *Store) ApplyProposalBudgets(ctx context.Context, report *analyzer.Report, profile *config.ApplicationProfile) error {
@@ -88,10 +88,11 @@ func (s *Store) ApplyProposalBudgets(ctx context.Context, report *analyzer.Repor
 	return nil
 }
 
-func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report, batchWindow time.Duration) error {
+func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report, profile *config.ApplicationProfile, batchWindow time.Duration) error {
 	if report == nil || batchWindow <= 0 {
 		return nil
 	}
+	policies := workloadPolicies(profile)
 	generatedAt := report.GeneratedAt
 	if generatedAt.IsZero() {
 		generatedAt = time.Now().UTC()
@@ -100,7 +101,8 @@ func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report,
 		workload := &report.Workloads[index]
 		plan := workload.Recommendation.PatchPlan
 		if proposalEventPlan(plan) {
-			if urgentBatchBypass(report.SharedSignals, workload, plan) {
+			policy := policies[workload.Name]
+			if urgentBatchBypassAllowed(policy) && urgentBatchBypass(report.SharedSignals, workload, plan) {
 				plan.BlockReasons = append(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly")
 				continue
 			}
@@ -121,6 +123,24 @@ func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report,
 		}
 	}
 	return nil
+}
+
+func workloadPolicies(profile *config.ApplicationProfile) map[string]config.PolicySpec {
+	policies := map[string]config.PolicySpec{}
+	if profile == nil {
+		return policies
+	}
+	for _, workload := range profile.Spec.Workloads {
+		policies[workload.Name] = workload.Policy
+	}
+	return policies
+}
+
+func urgentBatchBypassAllowed(policy config.PolicySpec) bool {
+	if policy.Safety.UrgentBypassAllowed == nil {
+		return true
+	}
+	return *policy.Safety.UrgentBypassAllowed
 }
 
 func (s *Store) upsertProposalBatchItem(ctx context.Context, application string, workload *analyzer.WorkloadReport, plan *analyzer.PatchPlan, generatedAt time.Time) (time.Time, error) {

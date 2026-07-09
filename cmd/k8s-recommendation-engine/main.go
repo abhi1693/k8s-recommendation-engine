@@ -194,7 +194,7 @@ func runProposalAutoRollback(args []string) error {
 	if err := state.AttachAndRecord(ctx, options.stateDB, report); err != nil {
 		return err
 	}
-	analyzer.AttachSafetyAssessments(report)
+	analyzer.AttachSafetyAssessmentsWithPolicy(report, profile)
 	observation := analyzer.ObserveConvergence(ctx, options.gitWorktree, *baseBranch, profile, report)
 	if err := state.RecordObservation(ctx, options.stateDB, observation); err != nil {
 		return err
@@ -463,12 +463,12 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 	if err := state.AttachAndRecord(ctx, options.stateDB, report); err != nil {
 		return err
 	}
-	analyzer.AttachSafetyAssessments(report)
+	analyzer.AttachSafetyAssessmentsWithPolicy(report, profile)
 	analyzer.AttachPatchPlans(options.gitWorktree, profile, report)
 	if err := state.ApplyProposalBudgets(ctx, options.stateDB, report, profile); err != nil {
 		return err
 	}
-	if err := state.ApplyProposalBatch(ctx, options.stateDB, report, options.proposalKind, options.proposalBatchWindow); err != nil {
+	if err := state.ApplyProposalBatch(ctx, options.stateDB, report, profile, options.proposalKind, options.proposalBatchWindow); err != nil {
 		return err
 	}
 	if err := attachProposal(ctx, options, profile, report); err != nil {

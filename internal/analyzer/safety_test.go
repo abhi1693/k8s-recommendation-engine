@@ -133,3 +133,107 @@ spec:
 		t.Fatalf("patch plan should be applyable: %#v", plan)
 	}
 }
+
+func TestSafetyPolicyBlocksRiskClassNotAllowed(t *testing.T) {
+	report := &Report{
+		Workloads: []WorkloadReport{
+			{
+				Name:             "web",
+				Namespace:        "shipyardhq",
+				Deployment:       "shipyardhq",
+				Replicas:         2,
+				ReadyReplicas:    2,
+				MetricsCondition: "healthy",
+				Rollout:          RolloutReport{Evaluated: true, Settled: true},
+				Recommendation: Recommendation{
+					CurrentReplicas:          2,
+					RecommendedReplicas:      2,
+					CurrentCPURequest:        "700m",
+					RecommendedCPURequest:    "560m",
+					CurrentMemoryRequest:     "5Gi",
+					RecommendedMemoryRequest: "5Gi",
+					Learning:                 LearningEvidence{Persistent: &PersistentLearning{}},
+				},
+			},
+		},
+	}
+	profile := &config.ApplicationProfile{
+		Spec: config.ApplicationSpec{
+			Workloads: []config.WorkloadSpec{
+				{
+					Name: "web",
+					Policy: config.PolicySpec{
+						Safety: config.SafetyPolicySpec{AllowAutoCommit: []string{SafetyLowRisk}},
+					},
+				},
+			},
+		},
+	}
+
+	AttachSafetyAssessmentsWithPolicy(report, profile)
+	rec := report.Workloads[0].Recommendation
+	if rec.Safety.Classification != SafetyMediumRisk {
+		t.Fatalf("safety = %s, want medium_risk", rec.Safety.Classification)
+	}
+	if rec.Safety.AutoCommitAllowed {
+		t.Fatal("AutoCommitAllowed = true, want false")
+	}
+	if !rec.Blocked {
+		t.Fatal("Recommendation.Blocked = false, want true")
+	}
+	if !stringSliceContains(rec.ReasonCodes, "safety_auto_commit_blocked") {
+		t.Fatalf("missing policy block reason code: %#v", rec.ReasonCodes)
+	}
+}
+
+func TestSafetyPolicyMaxDecreaseRiskBlocksLargerDecrease(t *testing.T) {
+	report := &Report{
+		Workloads: []WorkloadReport{
+			{
+				Name:             "web",
+				Namespace:        "shipyardhq",
+				Deployment:       "shipyardhq",
+				Replicas:         2,
+				ReadyReplicas:    2,
+				MetricsCondition: "healthy",
+				Rollout:          RolloutReport{Evaluated: true, Settled: true},
+				Recommendation: Recommendation{
+					CurrentReplicas:          2,
+					RecommendedReplicas:      2,
+					CurrentCPURequest:        "700m",
+					RecommendedCPURequest:    "560m",
+					CurrentMemoryRequest:     "5Gi",
+					RecommendedMemoryRequest: "5Gi",
+					Learning:                 LearningEvidence{Persistent: &PersistentLearning{}},
+				},
+			},
+		},
+	}
+	profile := &config.ApplicationProfile{
+		Spec: config.ApplicationSpec{
+			Workloads: []config.WorkloadSpec{
+				{
+					Name: "web",
+					Policy: config.PolicySpec{
+						Safety: config.SafetyPolicySpec{
+							AllowAutoCommit: []string{SafetyLowRisk, SafetyMediumRisk},
+							MaxDecreaseRisk: SafetyLowRisk,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	AttachSafetyAssessmentsWithPolicy(report, profile)
+	rec := report.Workloads[0].Recommendation
+	if rec.Safety.Classification != SafetyMediumRisk {
+		t.Fatalf("safety = %s, want medium_risk", rec.Safety.Classification)
+	}
+	if rec.Safety.AutoCommitAllowed {
+		t.Fatal("AutoCommitAllowed = true, want false")
+	}
+	if !rec.Blocked {
+		t.Fatal("Recommendation.Blocked = false, want true")
+	}
+}

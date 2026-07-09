@@ -145,6 +145,10 @@ Proposal frequency can also be limited per workload. Unset or `0` means unlimite
 policy:
   maxProposalsPerHour: 1
   maxProposalsPerDay: 4
+  safety:
+    allowAutoCommit: [low_risk, medium_risk]
+    maxDecreaseRisk: medium_risk
+    urgentBypassAllowed: true
 ```
 
 Proposal commits are grouped by default. When `--mode propose --proposal-kind commit` is used, stable applyable recommendations are first stored in SQLite and only become commit-eligible after the proposal batch window elapses. The default window is `15m`, which reduces one-commit-per-reconcile noise and lets multiple workload changes land in one reviewable Git commit.
@@ -159,7 +163,7 @@ go run ./cmd/k8s-recommendation-engine run \
 
 Set `--proposal-batch-window 0` to restore immediate commit behavior. A non-zero batch window requires `--state-db` because the pending batch must survive reconcile loops and process restarts.
 
-The batch window is bypassed for urgent surge protection. If a workload or shared traffic signal has an active request-rate, latency, error-rate, or concurrency anomaly and the proposal increases replicas, CPU, or memory, the commit can be created immediately. Decreases never bypass the batch window.
+The batch window is bypassed for urgent surge protection. If a workload or shared traffic signal has an active request-rate, latency, error-rate, or concurrency anomaly and the proposal increases replicas, CPU, or memory, the commit can be created immediately. Decreases never bypass the batch window. Set `policy.safety.urgentBypassAllowed: false` for a workload when even urgent increases must wait for the batch window.
 
 Before writing a proposal, the engine also checks the live Deployment rollout state. A proposal is blocked while the Deployment generation is still pending, updated/ready/available replicas have not caught up, unavailable replicas exist, or selected Pods are terminating, pending, unready, or have incomplete init containers. This prevents the controller from stacking new recommendations on top of an app that Fleet or Kubernetes has not finished applying yet.
 
@@ -169,7 +173,7 @@ Every recommendation also gets a safety classification before any Git proposal i
 - `medium_risk`
 - `high_risk`
 
-Safety considers resource decrease size, prior forecast accuracy, workload health, rollout history, memory headroom, and traffic anomaly state. `low_risk` and `medium_risk` recommendations can be proposed automatically after the normal stability, rollout, budget, and Git gates pass. `high_risk` recommendations are reported but blocked from auto-commit.
+Safety considers resource decrease size, prior forecast accuracy, workload health, rollout history, memory headroom, and traffic anomaly state. By default, `low_risk` and `medium_risk` recommendations can be proposed automatically after the normal stability, rollout, budget, and Git gates pass. `policy.safety.allowAutoCommit` overrides that allow-list per workload, and `policy.safety.maxDecreaseRisk` blocks auto-commit when the resource decrease factor is riskier than the configured maximum.
 
 ## Run Continuously Without Git Changes
 

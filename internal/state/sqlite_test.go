@@ -589,7 +589,7 @@ func TestProposalBatchBlocksUntilWindowElapses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
 	first.Proposal = nil
-	if err := ApplyProposalBatch(context.Background(), path, first, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, first, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	firstPlan := first.Workloads[0].Recommendation.PatchPlan
@@ -602,7 +602,7 @@ func TestProposalBatchBlocksUntilWindowElapses(t *testing.T) {
 
 	second := testProposalReport(time.Date(2026, 7, 9, 18, 16, 0, 0, time.UTC))
 	second.Proposal = nil
-	if err := ApplyProposalBatch(context.Background(), path, second, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, second, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	secondPlan := second.Workloads[0].Recommendation.PatchPlan
@@ -617,7 +617,7 @@ func TestProposalBatchBlocksUntilWindowElapses(t *testing.T) {
 func TestProposalBatchRequiresStateDB(t *testing.T) {
 	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
 	report.Proposal = nil
-	if err := ApplyProposalBatch(context.Background(), "", report, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), "", report, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	plan := report.Workloads[0].Recommendation.PatchPlan
@@ -633,12 +633,12 @@ func TestRecordProposalEventsClearsProposalBatchItem(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
 	first.Proposal = nil
-	if err := ApplyProposalBatch(context.Background(), path, first, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, first, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 
 	ready := testProposalReport(time.Date(2026, 7, 9, 18, 16, 0, 0, time.UTC))
-	if err := ApplyProposalBatch(context.Background(), path, ready, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, ready, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if err := RecordProposalEvents(context.Background(), path, ready); err != nil {
@@ -647,7 +647,7 @@ func TestRecordProposalEventsClearsProposalBatchItem(t *testing.T) {
 
 	next := testProposalReport(time.Date(2026, 7, 9, 18, 17, 0, 0, time.UTC))
 	next.Proposal = nil
-	if err := ApplyProposalBatch(context.Background(), path, next, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, next, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	plan := next.Workloads[0].Recommendation.PatchPlan
@@ -660,7 +660,7 @@ func TestProposalBatchResetsWindowWhenRecommendationChanges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
 	first.Proposal = nil
-	if err := ApplyProposalBatch(context.Background(), path, first, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, first, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 
@@ -668,7 +668,7 @@ func TestProposalBatchResetsWindowWhenRecommendationChanges(t *testing.T) {
 	changed.Proposal = nil
 	changed.Workloads[0].Recommendation.RecommendedCPURequest = "480m"
 	changed.Workloads[0].Recommendation.PatchPlan.Changes[0].Recommended = "480m"
-	if err := ApplyProposalBatch(context.Background(), path, changed, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, changed, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	plan := changed.Workloads[0].Recommendation.PatchPlan
@@ -694,7 +694,7 @@ func TestProposalBatchBypassesWindowForUrgentTrafficScaleUp(t *testing.T) {
 		{Name: "request_rate", Anomaly: analyzer.AnomalyStatus{State: "critical", Reason: "spike"}},
 	}
 
-	if err := ApplyProposalBatch(context.Background(), path, report, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, report, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	plan := workload.Recommendation.PatchPlan
@@ -703,6 +703,48 @@ func TestProposalBatchBypassesWindowForUrgentTrafficScaleUp(t *testing.T) {
 	}
 	if !contains(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly") {
 		t.Fatalf("missing urgent bypass reason: %#v", plan.BlockReasons)
+	}
+}
+
+func TestProposalBatchHonorsUrgentBypassPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	report.Proposal = nil
+	workload := &report.Workloads[0]
+	workload.Recommendation.CurrentReplicas = 2
+	workload.Recommendation.RecommendedReplicas = 3
+	workload.Recommendation.PatchPlan.Changes = []analyzer.PatchChange{
+		{Field: "spec.replicas", Operation: "replace", Current: "2", Recommended: "3"},
+	}
+	workload.MetricSignals = []analyzer.SignalReport{
+		{Name: "request_rate", Anomaly: analyzer.AnomalyStatus{State: "critical", Reason: "spike"}},
+	}
+	urgentBypassAllowed := false
+	profile := &config.ApplicationProfile{
+		Spec: config.ApplicationSpec{
+			Workloads: []config.WorkloadSpec{
+				{
+					Name: "web",
+					Policy: config.PolicySpec{
+						Safety: config.SafetyPolicySpec{UrgentBypassAllowed: &urgentBypassAllowed},
+					},
+				},
+			},
+		},
+	}
+
+	if err := ApplyProposalBatch(context.Background(), path, report, profile, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	plan := workload.Recommendation.PatchPlan
+	if plan == nil || !plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want batch window block when urgent bypass is disabled", plan)
+	}
+	if contains(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly") {
+		t.Fatalf("unexpected urgent bypass reason: %#v", plan.BlockReasons)
+	}
+	if !containsPrefix(plan.BlockReasons, "proposal batch window open:") {
+		t.Fatalf("missing batch window reason: %#v", plan.BlockReasons)
 	}
 }
 
@@ -715,7 +757,7 @@ func TestProposalBatchDoesNotBypassForAnomalousDecrease(t *testing.T) {
 		{Name: "request_rate", Anomaly: analyzer.AnomalyStatus{State: "critical", Reason: "spike"}},
 	}
 
-	if err := ApplyProposalBatch(context.Background(), path, report, "commit", 15*time.Minute); err != nil {
+	if err := ApplyProposalBatch(context.Background(), path, report, nil, "commit", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	plan := workload.Recommendation.PatchPlan

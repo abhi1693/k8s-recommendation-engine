@@ -86,8 +86,15 @@ type ChangeBounds struct {
 }
 
 type PolicySpec struct {
-	MaxProposalsPerHour int `yaml:"maxProposalsPerHour" json:"maxProposalsPerHour"`
-	MaxProposalsPerDay  int `yaml:"maxProposalsPerDay" json:"maxProposalsPerDay"`
+	MaxProposalsPerHour int              `yaml:"maxProposalsPerHour" json:"maxProposalsPerHour"`
+	MaxProposalsPerDay  int              `yaml:"maxProposalsPerDay" json:"maxProposalsPerDay"`
+	Safety              SafetyPolicySpec `yaml:"safety" json:"safety"`
+}
+
+type SafetyPolicySpec struct {
+	AllowAutoCommit     []string `yaml:"allowAutoCommit" json:"allowAutoCommit"`
+	MaxDecreaseRisk     string   `yaml:"maxDecreaseRisk" json:"maxDecreaseRisk"`
+	UrgentBypassAllowed *bool    `yaml:"urgentBypassAllowed" json:"urgentBypassAllowed,omitempty"`
 }
 
 type MetricProfile struct {
@@ -154,6 +161,14 @@ func (p *ApplicationProfile) Validate() error {
 		if workload.Policy.MaxProposalsPerDay < 0 {
 			return fmt.Errorf("workload %s policy.maxProposalsPerDay must be non-negative", workload.Name)
 		}
+		for _, risk := range workload.Policy.Safety.AllowAutoCommit {
+			if !validSafetyRisk(risk) {
+				return fmt.Errorf("workload %s policy.safety.allowAutoCommit contains unsupported risk %q", workload.Name, risk)
+			}
+		}
+		if workload.Policy.Safety.MaxDecreaseRisk != "" && !validSafetyRisk(workload.Policy.Safety.MaxDecreaseRisk) {
+			return fmt.Errorf("workload %s policy.safety.maxDecreaseRisk %q is unsupported", workload.Name, workload.Policy.Safety.MaxDecreaseRisk)
+		}
 	}
 	for _, signal := range p.Spec.SharedSignals {
 		if signal.Name == "" {
@@ -164,6 +179,15 @@ func (p *ApplicationProfile) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validSafetyRisk(risk string) bool {
+	switch risk {
+	case "low_risk", "medium_risk", "high_risk":
+		return true
+	default:
+		return false
+	}
 }
 
 func (w WorkloadSpec) VarsWithDefaults(namespace string) map[string]string {

@@ -218,6 +218,7 @@ type commandOptions struct {
 	proposalBranch         string
 	proposalRemote         string
 	proposalPush           bool
+	proposalBatchWindow    time.Duration
 	allowDefaultBranchPush bool
 }
 
@@ -379,6 +380,7 @@ func addCommonFlags(fs *flag.FlagSet) *commandOptions {
 	fs.StringVar(&options.proposalBranch, "proposal-branch", "", "commit target branch: explicit repo default branch or k8s-recommendation-engine/* proposal branch")
 	fs.StringVar(&options.proposalRemote, "proposal-remote", "origin", "Git remote used when --proposal-push is set")
 	fs.BoolVar(&options.proposalPush, "proposal-push", false, "push proposal commit to the configured remote")
+	fs.DurationVar(&options.proposalBatchWindow, "proposal-batch-window", 15*time.Minute, "stable recommendation batch window before creating proposal commits; set 0 to commit immediately")
 	fs.BoolVar(&options.allowDefaultBranchPush, "allow-default-branch-push", false, "allow --proposal-push when the proposal branch is the configured default branch")
 	return options
 }
@@ -409,6 +411,9 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 	analyzer.AttachSafetyAssessments(report)
 	analyzer.AttachPatchPlans(options.gitWorktree, profile, report)
 	if err := state.ApplyProposalBudgets(ctx, options.stateDB, report, profile); err != nil {
+		return err
+	}
+	if err := state.ApplyProposalBatch(ctx, options.stateDB, report, options.proposalKind, options.proposalBatchWindow); err != nil {
 		return err
 	}
 	if err := attachProposal(ctx, options, profile, report); err != nil {

@@ -2,6 +2,8 @@ package state
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -33,6 +35,24 @@ func RecordProposalEvents(ctx context.Context, path string, report *analyzer.Rep
 	return store.RecordProposalEvents(ctx, report)
 }
 
+func ApplyProposalBatch(ctx context.Context, path string, report *analyzer.Report, proposalKind string, batchWindow time.Duration) error {
+	if report == nil || proposalKind != "commit" || batchWindow <= 0 {
+		return nil
+	}
+	if path == "" {
+		if !reportHasNoApplyablePlans(report) {
+			blockApplyablePlans(report, "proposal batch window requires --state-db for persisted grouping")
+		}
+		return nil
+	}
+	store, err := Open(path)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.ApplyProposalBatch(ctx, report, batchWindow)
+}
+
 func (s *Store) ApplyProposalBudgets(ctx context.Context, report *analyzer.Report, profile *config.ApplicationProfile) error {
 	workloads := make(map[string]config.WorkloadSpec, len(profile.Spec.Workloads))
 	for _, workload := range profile.Spec.Workloads {
@@ -61,6 +81,133 @@ func (s *Store) ApplyProposalBudgets(ctx context.Context, report *analyzer.Repor
 		plan.Blocked = true
 		plan.Needed = false
 		plan.BlockReasons = append(plan.BlockReasons, reasons...)
+	}
+	return nil
+}
+
+func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report, batchWindow time.Duration) error {
+	if report == nil || batchWindow <= 0 {
+		return nil
+	}
+	generatedAt := report.GeneratedAt
+	if generatedAt.IsZero() {
+		generatedAt = time.Now().UTC()
+	}
+	for index := range report.Workloads {
+		workload := &report.Workloads[index]
+		plan := workload.Recommendation.PatchPlan
+		if proposalEventPlan(plan) {
+			firstSeen, err := s.upsertProposalBatchItem(ctx, report.Application, workload, plan, generatedAt)
+			if err != nil {
+				return err
+			}
+			readyAt := firstSeen.Add(batchWindow)
+			if generatedAt.Before(readyAt) {
+				plan.Blocked = true
+				plan.Needed = false
+				plan.BlockReasons = append(plan.BlockReasons, fmt.Sprintf("proposal batch window open: first_seen=%s ready_at=%s window=%s", firstSeen.Format(time.RFC3339), readyAt.Format(time.RFC3339), batchWindow))
+			}
+			continue
+		}
+		if err := s.deleteProposalBatchItem(ctx, report.Application, workload.Namespace, workload.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) upsertProposalBatchItem(ctx context.Context, application string, workload *analyzer.WorkloadReport, plan *analyzer.PatchPlan, generatedAt time.Time) (time.Time, error) {
+	var firstSeenRaw, existingPlanJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT first_seen_at, patch_plan_json
+		FROM proposal_batch_items
+		WHERE application = ?
+			AND namespace = ?
+			AND workload_name = ?
+	`, application, workload.Namespace, workload.Name).Scan(&firstSeenRaw, &existingPlanJSON)
+	switch {
+	case err == nil:
+		encoded, marshalErr := json.Marshal(plan)
+		if marshalErr != nil {
+			return time.Time{}, fmt.Errorf("encode proposal batch item: %w", marshalErr)
+		}
+		firstSeen, parseErr := time.Parse(time.RFC3339Nano, firstSeenRaw)
+		if parseErr != nil {
+			return time.Time{}, fmt.Errorf("parse proposal batch first_seen_at: %w", parseErr)
+		}
+		if existingPlanJSON != string(encoded) {
+			firstSeen = generatedAt
+		}
+		if _, updateErr := s.db.ExecContext(ctx, `
+			UPDATE proposal_batch_items
+			SET deployment = ?,
+				source_file = ?,
+				resource = ?,
+				patch_plan_json = ?,
+				first_seen_at = ?,
+				last_seen_at = ?
+			WHERE application = ?
+				AND namespace = ?
+				AND workload_name = ?
+		`,
+			workload.Deployment,
+			plan.SourceFile,
+			plan.Resource,
+			string(encoded),
+			firstSeen.Format(time.RFC3339Nano),
+			generatedAt.Format(time.RFC3339Nano),
+			application,
+			workload.Namespace,
+			workload.Name,
+		); updateErr != nil {
+			return time.Time{}, fmt.Errorf("update proposal batch item: %w", updateErr)
+		}
+		return firstSeen, nil
+	case err != nil && err != sql.ErrNoRows:
+		return time.Time{}, fmt.Errorf("lookup proposal batch item: %w", err)
+	}
+
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("encode proposal batch item: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO proposal_batch_items (
+			application,
+			namespace,
+			workload_name,
+			deployment,
+			source_file,
+			resource,
+			patch_plan_json,
+			first_seen_at,
+			last_seen_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		application,
+		workload.Namespace,
+		workload.Name,
+		workload.Deployment,
+		plan.SourceFile,
+		plan.Resource,
+		string(encoded),
+		generatedAt.Format(time.RFC3339Nano),
+		generatedAt.Format(time.RFC3339Nano),
+	); err != nil {
+		return time.Time{}, fmt.Errorf("insert proposal batch item: %w", err)
+	}
+	return generatedAt, nil
+}
+
+func (s *Store) deleteProposalBatchItem(ctx context.Context, application, namespace, workload string) error {
+	if _, err := s.db.ExecContext(ctx, `
+		DELETE FROM proposal_batch_items
+		WHERE application = ?
+			AND namespace = ?
+			AND workload_name = ?
+	`, application, namespace, workload); err != nil {
+		return fmt.Errorf("delete proposal batch item: %w", err)
 	}
 	return nil
 }
@@ -139,10 +286,34 @@ func (s *Store) RecordProposalEvents(ctx context.Context, report *analyzer.Repor
 		); err != nil {
 			return fmt.Errorf("record proposal event: %w", err)
 		}
+		if err := s.deleteProposalBatchItem(ctx, report.Application, workload.Namespace, workload.Name); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func proposalEventPlan(plan *analyzer.PatchPlan) bool {
 	return plan != nil && plan.Needed && !plan.Blocked && len(plan.Errors) == 0 && len(plan.Changes) > 0
+}
+
+func reportHasNoApplyablePlans(report *analyzer.Report) bool {
+	for _, workload := range report.Workloads {
+		if proposalEventPlan(workload.Recommendation.PatchPlan) {
+			return false
+		}
+	}
+	return true
+}
+
+func blockApplyablePlans(report *analyzer.Report, reason string) {
+	for index := range report.Workloads {
+		plan := report.Workloads[index].Recommendation.PatchPlan
+		if !proposalEventPlan(plan) {
+			continue
+		}
+		plan.Blocked = true
+		plan.Needed = false
+		plan.BlockReasons = append(plan.BlockReasons, reason)
+	}
 }

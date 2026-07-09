@@ -213,6 +213,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_proposal_events_lookup
 			ON proposal_events(application, namespace, workload_name, generated_at);`,
+		`CREATE TABLE IF NOT EXISTS proposal_batch_items (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			application TEXT NOT NULL,
+			namespace TEXT NOT NULL,
+			workload_name TEXT NOT NULL,
+			deployment TEXT NOT NULL,
+			source_file TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			patch_plan_json TEXT NOT NULL,
+			first_seen_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			UNIQUE(application, namespace, workload_name)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_proposal_batch_items_lookup
+			ON proposal_batch_items(application, namespace, workload_name, first_seen_at);`,
 		`CREATE TABLE IF NOT EXISTS seasonal_signal_observations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			application TEXT NOT NULL,

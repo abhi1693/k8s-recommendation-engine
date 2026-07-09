@@ -585,6 +585,101 @@ func TestProposalBudgetIsUnlimitedWhenUnset(t *testing.T) {
 	}
 }
 
+func TestProposalBatchBlocksUntilWindowElapses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	first.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, first, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	firstPlan := first.Workloads[0].Recommendation.PatchPlan
+	if firstPlan == nil || !firstPlan.Blocked {
+		t.Fatalf("first PatchPlan = %#v, want batch blocked", firstPlan)
+	}
+	if !containsPrefix(firstPlan.BlockReasons, "proposal batch window open:") {
+		t.Fatalf("missing batch window reason: %#v", firstPlan.BlockReasons)
+	}
+
+	second := testProposalReport(time.Date(2026, 7, 9, 18, 16, 0, 0, time.UTC))
+	second.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, second, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	secondPlan := second.Workloads[0].Recommendation.PatchPlan
+	if secondPlan == nil || secondPlan.Blocked {
+		t.Fatalf("second PatchPlan = %#v, want released after batch window", secondPlan)
+	}
+	if !secondPlan.Needed {
+		t.Fatal("second PatchPlan.Needed = false, want true")
+	}
+}
+
+func TestProposalBatchRequiresStateDB(t *testing.T) {
+	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	report.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), "", report, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || !plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want blocked without state db", plan)
+	}
+	if !contains(plan.BlockReasons, "proposal batch window requires --state-db for persisted grouping") {
+		t.Fatalf("missing state db block reason: %#v", plan.BlockReasons)
+	}
+}
+
+func TestRecordProposalEventsClearsProposalBatchItem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	first.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, first, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	ready := testProposalReport(time.Date(2026, 7, 9, 18, 16, 0, 0, time.UTC))
+	if err := ApplyProposalBatch(context.Background(), path, ready, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordProposalEvents(context.Background(), path, ready); err != nil {
+		t.Fatal(err)
+	}
+
+	next := testProposalReport(time.Date(2026, 7, 9, 18, 17, 0, 0, time.UTC))
+	next.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, next, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	plan := next.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || !plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want new batch window after cleanup", plan)
+	}
+}
+
+func TestProposalBatchResetsWindowWhenRecommendationChanges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	first.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, first, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := testProposalReport(time.Date(2026, 7, 9, 18, 16, 0, 0, time.UTC))
+	changed.Proposal = nil
+	changed.Workloads[0].Recommendation.RecommendedCPURequest = "480m"
+	changed.Workloads[0].Recommendation.PatchPlan.Changes[0].Recommended = "480m"
+	if err := ApplyProposalBatch(context.Background(), path, changed, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	plan := changed.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || !plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want reset batch window after recommendation changed", plan)
+	}
+	if !containsPrefix(plan.BlockReasons, "proposal batch window open:") {
+		t.Fatalf("missing batch window reason after changed recommendation: %#v", plan.BlockReasons)
+	}
+}
+
 func TestSeasonalityPersistsHourlyBuckets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	base := time.Date(2026, 7, 7, 14, 0, 0, 0, time.UTC)

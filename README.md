@@ -147,6 +147,18 @@ policy:
   maxProposalsPerDay: 4
 ```
 
+Proposal commits are grouped by default. When `--mode propose --proposal-kind commit` is used, stable applyable recommendations are first stored in SQLite and only become commit-eligible after the proposal batch window elapses. The default window is `15m`, which reduces one-commit-per-reconcile noise and lets multiple workload changes land in one reviewable Git commit.
+
+```bash
+go run ./cmd/k8s-recommendation-engine run \
+  --mode propose \
+  --proposal-kind commit \
+  --proposal-batch-window 15m \
+  --state-db .state/k8s-recommendation-engine.db
+```
+
+Set `--proposal-batch-window 0` to restore immediate commit behavior. A non-zero batch window requires `--state-db` because the pending batch must survive reconcile loops and process restarts.
+
 Before writing a proposal, the engine also checks the live Deployment rollout state. A proposal is blocked while the Deployment generation is still pending, updated/ready/available replicas have not caught up, unavailable replicas exist, or selected Pods are terminating, pending, unready, or have incomplete init containers. This prevents the controller from stacking new recommendations on top of an app that Fleet or Kubernetes has not finished applying yet.
 
 Every recommendation also gets a safety classification before any Git proposal is written:

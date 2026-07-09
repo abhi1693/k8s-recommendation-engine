@@ -189,6 +189,8 @@ Safety considers resource decrease size, prior forecast accuracy, workload healt
 
 Confidence also decays automatically when Prometheus data quality weakens. Sparse range history, stale samples, noisy history, missing current samples, and query errors reduce the final confidence score. A recommendation with an actual resource or replica change is blocked when the adjusted confidence is below `policy.confidence.minAutoCommit`; the default is `0.75`.
 
+Reports also convert recommendations into waste/savings units. CPU is shown as core-hours, memory as GiB-hours, and replicas as replica-hours. Hourly reduction is projected over `730h` for the monthly estimate. Positive values mean reduced requested capacity; negative values mean the recommendation intentionally adds capacity.
+
 ## Run Continuously Without Git Changes
 
 Use `run` for controller-like continuous reconciliation in dry-run mode. This reads Kubernetes and Prometheus, records learning state when `--state-db` is set, and prints recommendations every interval. It does not patch Kubernetes and does not write to Git.

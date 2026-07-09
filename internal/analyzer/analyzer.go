@@ -732,6 +732,10 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 	}
 
 	applyMinimumResourceChangeThreshold(workload, &recommendation)
+	recommendation.Waste = buildWasteScore(recommendation)
+	if recommendation.Waste.Summary != "" {
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, "waste_score:"+recommendation.Waste.Summary)
+	}
 	recommendation.Learning = buildLearningEvidence(workload, report, recommendation, trafficDecision, cpuDrivenReplicas, memoryDrivenReplicas)
 	baseConfidence := recommendationConfidence(report, hasCPU, hasMemory, hasRequestRate)
 	applyConfidenceDecay(workload, report, sharedSignals, &recommendation, baseConfidence)
@@ -753,6 +757,54 @@ func applyMinimumResourceChangeThreshold(workload config.WorkloadSpec, recommend
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "memory_request_hold_min_change_threshold")
 		}
 	}
+}
+
+const monthlyEstimateHours = 730.0
+
+func buildWasteScore(recommendation Recommendation) WasteScore {
+	currentReplicas := float64(maxInt32(recommendation.CurrentReplicas, 0))
+	recommendedReplicas := float64(maxInt32(recommendation.RecommendedReplicas, 0))
+	currentCPU, currentCPUOK := cpuRequestCores(recommendation.CurrentCPURequest)
+	recommendedCPU, recommendedCPUOK := cpuRequestCores(recommendation.RecommendedCPURequest)
+	currentMemory, currentMemoryOK := memoryRequestBytes(recommendation.CurrentMemoryRequest)
+	recommendedMemory, recommendedMemoryOK := memoryRequestBytes(recommendation.RecommendedMemoryRequest)
+
+	score := WasteScore{MonthlyHours: monthlyEstimateHours}
+	score.CurrentHourly.ReplicaHours = currentReplicas
+	score.RecommendedHourly.ReplicaHours = recommendedReplicas
+	score.HourlyReduction.ReplicaHours = currentReplicas - recommendedReplicas
+	if currentCPUOK && recommendedCPUOK {
+		score.CurrentHourly.CPUCoreHours = currentCPU * currentReplicas
+		score.RecommendedHourly.CPUCoreHours = recommendedCPU * recommendedReplicas
+		score.HourlyReduction.CPUCoreHours = score.CurrentHourly.CPUCoreHours - score.RecommendedHourly.CPUCoreHours
+	}
+	if currentMemoryOK && recommendedMemoryOK {
+		score.CurrentHourly.MemoryGiBHours = bytesToGiB(currentMemory) * currentReplicas
+		score.RecommendedHourly.MemoryGiBHours = bytesToGiB(recommendedMemory) * recommendedReplicas
+		score.HourlyReduction.MemoryGiBHours = score.CurrentHourly.MemoryGiBHours - score.RecommendedHourly.MemoryGiBHours
+	}
+	score.MonthlyReduction = ResourceHours{
+		CPUCoreHours:   score.HourlyReduction.CPUCoreHours * monthlyEstimateHours,
+		MemoryGiBHours: score.HourlyReduction.MemoryGiBHours * monthlyEstimateHours,
+		ReplicaHours:   score.HourlyReduction.ReplicaHours * monthlyEstimateHours,
+	}
+	score.Summary = wasteSummary(score)
+	return score
+}
+
+func wasteSummary(score WasteScore) string {
+	if score.HourlyReduction.CPUCoreHours == 0 && score.HourlyReduction.MemoryGiBHours == 0 && score.HourlyReduction.ReplicaHours == 0 {
+		return "no_resource_hour_change"
+	}
+	direction := "reduction"
+	if score.HourlyReduction.CPUCoreHours < 0 || score.HourlyReduction.MemoryGiBHours < 0 || score.HourlyReduction.ReplicaHours < 0 {
+		direction = "capacity_increase"
+	}
+	return fmt.Sprintf("%s monthly_cpu=%+.1f_core_hours monthly_memory=%+.1f_gib_hours monthly_replicas=%+.0f_replica_hours", direction, score.MonthlyReduction.CPUCoreHours, score.MonthlyReduction.MemoryGiBHours, score.MonthlyReduction.ReplicaHours)
+}
+
+func bytesToGiB(value float64) float64 {
+	return value / (1024 * 1024 * 1024)
 }
 
 func resourceChangeBelowThreshold(current, recommended string, thresholdPercent float64) (bool, float64) {

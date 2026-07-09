@@ -186,6 +186,7 @@ type Recommendation struct {
 	RecommendedMemoryRequest string                   `json:"recommendedMemoryRequest,omitempty"`
 	Confidence               float64                  `json:"confidence"`
 	ConfidenceAssessment     ConfidenceAssessment     `json:"confidenceAssessment"`
+	Waste                    WasteScore               `json:"waste"`
 	Safety                   SafetyAssessment         `json:"safety"`
 	Learning                 LearningEvidence         `json:"learning"`
 	ReplicaDecision          *ReplicaDecision         `json:"replicaDecision,omitempty"`
@@ -194,6 +195,21 @@ type Recommendation struct {
 	BlockReasons             []string                 `json:"blockReasons,omitempty"`
 	PatchPlan                *PatchPlan               `json:"patchPlan,omitempty"`
 	Stability                *RecommendationStability `json:"stability,omitempty"`
+}
+
+type WasteScore struct {
+	CurrentHourly     ResourceHours `json:"currentHourly"`
+	RecommendedHourly ResourceHours `json:"recommendedHourly"`
+	HourlyReduction   ResourceHours `json:"hourlyReduction"`
+	MonthlyReduction  ResourceHours `json:"monthlyReduction"`
+	MonthlyHours      float64       `json:"monthlyHours"`
+	Summary           string        `json:"summary"`
+}
+
+type ResourceHours struct {
+	CPUCoreHours   float64 `json:"cpuCoreHours"`
+	MemoryGiBHours float64 `json:"memoryGiBHours"`
+	ReplicaHours   float64 `json:"replicaHours"`
 }
 
 type ConfidenceAssessment struct {

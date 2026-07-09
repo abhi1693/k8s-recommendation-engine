@@ -332,6 +332,57 @@ func TestApplyMinimumResourceChangeThresholdSuppressesNoise(t *testing.T) {
 	}
 }
 
+func TestBuildWasteScoreCalculatesResourceHourReduction(t *testing.T) {
+	score := buildWasteScore(Recommendation{
+		CurrentReplicas:          2,
+		RecommendedReplicas:      1,
+		CurrentCPURequest:        "500m",
+		RecommendedCPURequest:    "400m",
+		CurrentMemoryRequest:     "1Gi",
+		RecommendedMemoryRequest: "768Mi",
+	})
+
+	if score.HourlyReduction.CPUCoreHours != 0.6 {
+		t.Fatalf("CPU hourly reduction = %.3f, want 0.6", score.HourlyReduction.CPUCoreHours)
+	}
+	if score.HourlyReduction.MemoryGiBHours != 1.25 {
+		t.Fatalf("memory hourly reduction = %.3f, want 1.25", score.HourlyReduction.MemoryGiBHours)
+	}
+	if score.HourlyReduction.ReplicaHours != 1 {
+		t.Fatalf("replica hourly reduction = %.3f, want 1", score.HourlyReduction.ReplicaHours)
+	}
+	if score.MonthlyReduction.CPUCoreHours != 438 {
+		t.Fatalf("monthly CPU reduction = %.3f, want 438", score.MonthlyReduction.CPUCoreHours)
+	}
+	if score.MonthlyReduction.MemoryGiBHours != 912.5 {
+		t.Fatalf("monthly memory reduction = %.3f, want 912.5", score.MonthlyReduction.MemoryGiBHours)
+	}
+	if !strings.Contains(score.Summary, "reduction") {
+		t.Fatalf("summary = %q, want reduction", score.Summary)
+	}
+}
+
+func TestBuildWasteScoreShowsCapacityIncrease(t *testing.T) {
+	score := buildWasteScore(Recommendation{
+		CurrentReplicas:          1,
+		RecommendedReplicas:      2,
+		CurrentCPURequest:        "500m",
+		RecommendedCPURequest:    "600m",
+		CurrentMemoryRequest:     "1Gi",
+		RecommendedMemoryRequest: "1536Mi",
+	})
+
+	if score.HourlyReduction.CPUCoreHours >= 0 {
+		t.Fatalf("CPU hourly reduction = %.3f, want negative capacity increase", score.HourlyReduction.CPUCoreHours)
+	}
+	if score.HourlyReduction.MemoryGiBHours >= 0 {
+		t.Fatalf("memory hourly reduction = %.3f, want negative capacity increase", score.HourlyReduction.MemoryGiBHours)
+	}
+	if !strings.Contains(score.Summary, "capacity_increase") {
+		t.Fatalf("summary = %q, want capacity_increase", score.Summary)
+	}
+}
+
 func TestLearnedResourcePolicyAdaptsToWorkloadVolatility(t *testing.T) {
 	stable := []SignalReport{
 		sampleSignalWithHistory("cpu_usage", 0.10, SignalHistory{Points: 24, P50: 0.09, P95: 0.10, Max: 0.11}),

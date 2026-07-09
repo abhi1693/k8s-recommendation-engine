@@ -273,6 +273,9 @@ func WriteActionsReport(w io.Writer, report *Report, gitWorktreeEnabled bool) er
 		if _, err := fmt.Fprintf(w, "  gates: replicas=%s cpu=%s memory=%s actionable=%s\n", replicaStabilitySummary(rec), cpuStabilitySummary(rec), memoryStabilitySummary(rec), actionableSummary(rec)); err != nil {
 			return err
 		}
+		if _, err := fmt.Fprintf(w, "  waste: %s\n", wasteSummaryLine(rec.Waste)); err != nil {
+			return err
+		}
 		if plan == nil {
 			if _, err := fmt.Fprintln(w, "  manifest: unavailable"); err != nil {
 				return err
@@ -448,6 +451,9 @@ func writeCompactDecisionSummary(w io.Writer, report *Report) error {
 		if _, err := fmt.Fprintf(w, "  memory:   %s basis=%s stability=%s\n", resourceDelta(rec.CurrentMemoryRequest, rec.RecommendedMemoryRequest), resourceBasis(rec), memoryStabilitySummary(rec)); err != nil {
 			return err
 		}
+		if _, err := fmt.Fprintf(w, "  waste:    %s\n", wasteSummaryLine(rec.Waste)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -558,6 +564,9 @@ func writePrettyWorkload(w io.Writer, workload WorkloadReport) error {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "    memory request: %s\n", resourceDelta(rec.CurrentMemoryRequest, rec.RecommendedMemoryRequest)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "    waste: %s\n", wasteSummaryLine(rec.Waste)); err != nil {
 		return err
 	}
 	if len(rec.BlockReasons) > 0 {
@@ -1279,6 +1288,25 @@ func resourceDelta(current, recommended string) string {
 		return "-"
 	}
 	return fmt.Sprintf("%s -> %s", emptyDash(current), emptyDash(recommended))
+}
+
+func wasteSummaryLine(score WasteScore) string {
+	if score.Summary == "" {
+		return "-"
+	}
+	return fmt.Sprintf("hourly cpu=%s core-h mem=%s GiB-h replicas=%s; monthly cpu=%s core-h mem=%s GiB-h replicas=%s",
+		signedFloat(score.HourlyReduction.CPUCoreHours, 3),
+		signedFloat(score.HourlyReduction.MemoryGiBHours, 3),
+		signedFloat(score.HourlyReduction.ReplicaHours, 0),
+		signedFloat(score.MonthlyReduction.CPUCoreHours, 1),
+		signedFloat(score.MonthlyReduction.MemoryGiBHours, 1),
+		signedFloat(score.MonthlyReduction.ReplicaHours, 0),
+	)
+}
+
+func signedFloat(value float64, decimals int) string {
+	format := "%+." + strconv.Itoa(decimals) + "f"
+	return fmt.Sprintf(format, value)
 }
 
 func prettySignalState(signal SignalReport) string {

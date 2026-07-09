@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -835,15 +836,34 @@ func primaryDecision(recommendation Recommendation) string {
 }
 
 func replicaBasis(recommendation Recommendation) string {
+	if hasReasonPrefix(recommendation, "replica_management_disabled") {
+		return "disabled"
+	}
+	if recommendation.RecommendedReplicas > recommendation.CurrentReplicas {
+		switch {
+		case reasonInt(recommendation, "traffic_replicas:") >= recommendation.RecommendedReplicas:
+			return "traffic"
+		case reasonInt(recommendation, "cpu_replicas:") >= recommendation.RecommendedReplicas && reasonInt(recommendation, "memory_replicas:") >= recommendation.RecommendedReplicas:
+			return "learned cpu+memory pressure"
+		case reasonInt(recommendation, "cpu_replicas:") >= recommendation.RecommendedReplicas:
+			return "learned cpu pressure"
+		case reasonInt(recommendation, "memory_replicas:") >= recommendation.RecommendedReplicas:
+			return "learned memory pressure"
+		case reasonInt(recommendation, "pdb_replica_floor:") >= recommendation.RecommendedReplicas:
+			return "pdb floor"
+		case reasonInt(recommendation, "availability_replica_floor:") >= recommendation.RecommendedReplicas:
+			return "availability floor"
+		default:
+			return "capacity"
+		}
+	}
 	switch {
-	case hasReasonPrefix(recommendation, "availability_replica_floor:"):
-		return "availability floor"
-	case hasReasonPrefix(recommendation, "pdb_replica_floor:"):
-		return "pdb floor"
 	case hasReasonPrefix(recommendation, "traffic_replicas:"):
 		return "traffic"
-	case hasReasonPrefix(recommendation, "replica_management_disabled"):
-		return "disabled"
+	case recommendation.RecommendedReplicas == reasonInt(recommendation, "pdb_replica_floor:"):
+		return "pdb floor"
+	case recommendation.RecommendedReplicas == reasonInt(recommendation, "availability_replica_floor:"):
+		return "availability floor"
 	default:
 		return "capacity"
 	}
@@ -989,6 +1009,19 @@ func hasReasonPrefix(recommendation Recommendation, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func reasonInt(recommendation Recommendation, prefix string) int32 {
+	for _, reason := range recommendation.ReasonCodes {
+		if !strings.HasPrefix(reason, prefix) {
+			continue
+		}
+		value, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(reason, prefix)), 10, 32)
+		if err == nil {
+			return int32(value)
+		}
+	}
+	return 0
 }
 
 func replicaDelta(recommendation Recommendation) string {

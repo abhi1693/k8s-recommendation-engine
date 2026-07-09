@@ -455,6 +455,9 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("cpu_utilization:%.1f%%", cpuUtilization*100))
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, learnedPolicyReason("cpu_policy_learned", cpuPolicy))
 		cpuDrivenReplicas = int32(math.Ceil(cpuForDecision / (container.CPURequestCores * cpuPolicy.TargetUtilization)))
+		if cpuDrivenReplicas > 0 {
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("cpu_replicas:%d", cpuDrivenReplicas))
+		}
 		if workload.Scaling.CPU && cpuUtilization > cpuPolicy.IncreaseThreshold {
 			perPodCPU := cpuForDecision / replicas
 			recommendedCPU := perPodCPU / cpuPolicy.TargetUtilization
@@ -485,6 +488,9 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_utilization:%.1f%%", memoryUtilization*100))
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, learnedPolicyReason("memory_policy_learned", memoryPolicy))
 		memoryDrivenReplicas = int32(math.Ceil(memoryForDecision / (container.MemoryRequestBytes * memoryPolicy.TargetUtilization)))
+		if memoryDrivenReplicas > 0 {
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_replicas:%d", memoryDrivenReplicas))
+		}
 		if workload.Scaling.Memory && memoryUtilization > memoryPolicy.IncreaseThreshold {
 			perPodMemory := memoryForDecision / replicas
 			recommendedMemory := perPodMemory / memoryPolicy.TargetUtilization

@@ -179,6 +179,37 @@ func TestWriteSummaryReport(t *testing.T) {
 	}
 }
 
+func TestReplicaBasisPrefersScaleUpDriverOverAvailabilityFloor(t *testing.T) {
+	recommendation := Recommendation{
+		CurrentReplicas:     2,
+		RecommendedReplicas: 3,
+		ReasonCodes: []string{
+			"availability_replica_floor:2",
+			"memory_replicas:3",
+			"replica_scale_up_recommended",
+		},
+	}
+
+	if got := replicaBasis(recommendation); got != "learned memory pressure" {
+		t.Fatalf("replicaBasis = %q, want learned memory pressure", got)
+	}
+}
+
+func TestReplicaBasisUsesAvailabilityFloorForHoldAtFloor(t *testing.T) {
+	recommendation := Recommendation{
+		CurrentReplicas:     2,
+		RecommendedReplicas: 2,
+		ReasonCodes: []string{
+			"availability_replica_floor:2",
+			"replica_count_hold",
+		},
+	}
+
+	if got := replicaBasis(recommendation); got != "availability floor" {
+		t.Fatalf("replicaBasis = %q, want availability floor", got)
+	}
+}
+
 func TestWriteActionsReport(t *testing.T) {
 	report := &Report{
 		Application: "shipyard",

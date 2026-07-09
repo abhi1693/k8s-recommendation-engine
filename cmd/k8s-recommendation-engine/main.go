@@ -518,6 +518,7 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 	if err := attachProposal(ctx, options, profile, report); err != nil {
 		return err
 	}
+	attachGitHealth(ctx, options, profile, report)
 	if err := state.RecordProposalEvents(ctx, options.stateDB, report); err != nil {
 		return err
 	}
@@ -609,6 +610,21 @@ func attachProposal(ctx context.Context, options *commandOptions, profile *confi
 	default:
 		return fmt.Errorf("unsupported mode %q", options.mode)
 	}
+}
+
+func attachGitHealth(ctx context.Context, options *commandOptions, profile *config.ApplicationProfile, report *analyzer.Report) {
+	if options.gitWorktree == "" || report == nil {
+		return
+	}
+	branch := strings.TrimSpace(options.proposalBranch)
+	if branch == "" && profile != nil {
+		branch = strings.TrimSpace(profile.Spec.Git.Branch)
+	}
+	report.GitHealth = analyzer.InspectGitHealth(ctx, options.gitWorktree, analyzer.GitHealthOptions{
+		Branch:      branch,
+		Remote:      options.proposalRemote,
+		PushEnabled: options.proposalPush,
+	})
 }
 
 func defaultKubeconfig() string {

@@ -11,6 +11,7 @@ type Report struct {
 	SharedSignals       []SignalReport      `json:"sharedSignals"`
 	Summary             Summary             `json:"summary"`
 	Proposal            *ProposalReport     `json:"proposal,omitempty"`
+	GitHealth           *GitHealthReport    `json:"gitHealth,omitempty"`
 }
 
 type ClusterCapabilities struct {
@@ -418,6 +419,26 @@ type ProposalReport struct {
 	Files        []ProposalFile `json:"files,omitempty"`
 	BlockReasons []string       `json:"blockReasons,omitempty"`
 	Errors       []string       `json:"errors,omitempty"`
+}
+
+type GitHealthReport struct {
+	Worktree              string   `json:"worktree"`
+	Branch                string   `json:"branch,omitempty"`
+	TargetBranch          string   `json:"targetBranch,omitempty"`
+	Remote                string   `json:"remote,omitempty"`
+	Upstream              string   `json:"upstream,omitempty"`
+	LocalCommit           string   `json:"localCommit,omitempty"`
+	RemoteCommit          string   `json:"remoteCommit,omitempty"`
+	Ahead                 int      `json:"ahead"`
+	Behind                int      `json:"behind"`
+	Diverged              bool     `json:"diverged"`
+	Dirty                 bool     `json:"dirty"`
+	DirtyLines            []string `json:"dirtyLines,omitempty"`
+	LatestProposalCommit  string   `json:"latestProposalCommit,omitempty"`
+	LatestProposalSubject string   `json:"latestProposalSubject,omitempty"`
+	Status                string   `json:"status"`
+	PushEnabled           bool     `json:"pushEnabled"`
+	Errors                []string `json:"errors,omitempty"`
 }
 
 type ProposalFile struct {

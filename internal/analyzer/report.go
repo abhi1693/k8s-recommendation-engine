@@ -16,6 +16,9 @@ func WriteTextReport(w io.Writer, report *Report) error {
 	if err := writeTextCapabilities(w, report.ClusterCapabilities); err != nil {
 		return err
 	}
+	if err := writeGitHealth(w, report.GitHealth); err != nil {
+		return err
+	}
 
 	if len(report.SharedSignals) > 0 {
 		if _, err := fmt.Fprintln(w, "Shared Signals:"); err != nil {
@@ -172,6 +175,9 @@ func WritePrettyReport(w io.Writer, report *Report) error {
 	if err := writePrettyCapabilities(w, report.ClusterCapabilities); err != nil {
 		return err
 	}
+	if err := writeGitHealth(w, report.GitHealth); err != nil {
+		return err
+	}
 
 	if err := writeCompactDecisionSummary(w, report); err != nil {
 		return err
@@ -216,6 +222,9 @@ func WriteSummaryReport(w io.Writer, report *Report) error {
 	if _, err := fmt.Fprintf(w, "Application: %s   Namespace: %s   Generated: %s\n\n", report.Application, report.Namespace, report.GeneratedAt.Format("2006-01-02T15:04:05Z")); err != nil {
 		return err
 	}
+	if err := writeGitHealth(w, report.GitHealth); err != nil {
+		return err
+	}
 	if err := writeCompactDecisionSummary(w, report); err != nil {
 		return err
 	}
@@ -248,6 +257,9 @@ func WriteActionsReport(w io.Writer, report *Report, gitWorktreeEnabled bool) er
 		if _, err := fmt.Fprintln(w, "Git diff: unavailable (pass --git-worktree to render dry-run manifest diffs)"); err != nil {
 			return err
 		}
+	}
+	if err := writeGitHealth(w, report.GitHealth); err != nil {
+		return err
 	}
 	if report.Proposal != nil {
 		if err := writeProposalSummary(w, report.Proposal); err != nil {
@@ -408,6 +420,54 @@ func writeProposalSummary(w io.Writer, proposal *ProposalReport) error {
 		if _, err := fmt.Fprintf(w, "Proposal error: %s\n", proposalError); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func writeGitHealth(w io.Writer, health *GitHealthReport) error {
+	if health == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "Git Worktree"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  status=%s branch=%s target=%s upstream=%s remote=%s push=%t\n",
+		emptyDash(health.Status),
+		emptyDash(health.Branch),
+		emptyDash(health.TargetBranch),
+		emptyDash(health.Upstream),
+		emptyDash(health.Remote),
+		health.PushEnabled,
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  local=%s remoteHead=%s ahead=%d behind=%d diverged=%t dirty=%t\n",
+		emptyDash(health.LocalCommit),
+		emptyDash(health.RemoteCommit),
+		health.Ahead,
+		health.Behind,
+		health.Diverged,
+		health.Dirty,
+	); err != nil {
+		return err
+	}
+	if health.LatestProposalCommit != "" {
+		if _, err := fmt.Fprintf(w, "  latestProposal=%s %s\n", health.LatestProposalCommit, health.LatestProposalSubject); err != nil {
+			return err
+		}
+	}
+	for _, dirty := range health.DirtyLines {
+		if _, err := fmt.Fprintf(w, "  dirty: %s\n", dirty); err != nil {
+			return err
+		}
+	}
+	for _, healthError := range health.Errors {
+		if _, err := fmt.Fprintf(w, "  error: %s\n", healthError); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
 	}
 	return nil
 }

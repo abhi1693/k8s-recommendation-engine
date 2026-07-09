@@ -235,6 +235,67 @@ func TestWriteSummaryReportIncludesProposalFailure(t *testing.T) {
 	}
 }
 
+func TestWriteSummaryReportIncludesGitHealth(t *testing.T) {
+	report := &Report{
+		Application: "shipyard",
+		Namespace:   "shipyardhq",
+		GeneratedAt: time.Date(2026, 7, 8, 18, 55, 34, 0, time.UTC),
+		Summary: Summary{
+			WorkloadsTotal: 1,
+			MetricsHealthy: 1,
+		},
+		GitHealth: &GitHealthReport{
+			Worktree:              "/git/home-lab",
+			Branch:                "master",
+			TargetBranch:          "master",
+			Remote:                "origin",
+			Upstream:              "origin/master",
+			LocalCommit:           "abc123",
+			RemoteCommit:          "def456",
+			Ahead:                 1,
+			Behind:                2,
+			Diverged:              true,
+			Dirty:                 true,
+			DirtyLines:            []string{"M app.yaml"},
+			LatestProposalCommit:  "abc123",
+			LatestProposalSubject: "k8s-recommendation-engine: propose resource changes",
+			Status:                "dirty",
+			PushEnabled:           true,
+		},
+		Workloads: []WorkloadReport{
+			{
+				Namespace:  "shipyardhq",
+				Deployment: "shipyardhq",
+				Recommendation: Recommendation{
+					CurrentReplicas:          2,
+					RecommendedReplicas:      2,
+					CurrentCPURequest:        "700m",
+					RecommendedCPURequest:    "700m",
+					CurrentMemoryRequest:     "5Gi",
+					RecommendedMemoryRequest: "5Gi",
+				},
+			},
+		},
+	}
+
+	var output bytes.Buffer
+	if err := WriteSummaryReport(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, want := range []string{
+		"Git Worktree",
+		"status=dirty branch=master target=master upstream=origin/master remote=origin push=true",
+		"local=abc123 remoteHead=def456 ahead=1 behind=2 diverged=true dirty=true",
+		"latestProposal=abc123 k8s-recommendation-engine: propose resource changes",
+		"dirty: M app.yaml",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary report missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestReplicaBasisPrefersScaleUpDriverOverAvailabilityFloor(t *testing.T) {
 	recommendation := Recommendation{
 		CurrentReplicas:     2,

@@ -257,6 +257,34 @@ func TestBuildRecommendationDecreasesOverReservedRequestsWithHistory(t *testing.
 	}
 }
 
+func TestApplyMinimumResourceChangeThresholdSuppressesNoise(t *testing.T) {
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{CPU: true, Memory: true},
+		Bounds: config.BoundsSpec{
+			CPU:    config.ChangeBounds{MinChangePercent: 5},
+			Memory: config.ChangeBounds{MinChangePercent: 5},
+		},
+	}
+	recommendation := Recommendation{
+		CurrentCPURequest:        "40m",
+		RecommendedCPURequest:    "30m",
+		CurrentMemoryRequest:     "76Mi",
+		RecommendedMemoryRequest: "77Mi",
+	}
+
+	applyMinimumResourceChangeThreshold(workload, &recommendation)
+
+	if recommendation.RecommendedCPURequest != "30m" {
+		t.Fatalf("RecommendedCPURequest = %q, want meaningful CPU change retained", recommendation.RecommendedCPURequest)
+	}
+	if recommendation.RecommendedMemoryRequest != "76Mi" {
+		t.Fatalf("RecommendedMemoryRequest = %q, want current request held by threshold", recommendation.RecommendedMemoryRequest)
+	}
+	if !hasReasonPrefix(recommendation, "memory_request_change_below_min_percent:") {
+		t.Fatalf("ReasonCodes missing min-change threshold: %#v", recommendation.ReasonCodes)
+	}
+}
+
 func TestLearnedResourcePolicyAdaptsToWorkloadVolatility(t *testing.T) {
 	stable := []SignalReport{
 		sampleSignalWithHistory("cpu_usage", 0.10, SignalHistory{Points: 24, P50: 0.09, P95: 0.10, Max: 0.11}),

@@ -176,6 +176,7 @@ func TestClassifyOutcomeAppliedSuccessful(t *testing.T) {
 
 	outcome := classifyOutcome(priorRun{
 		Actionable:               true,
+		CPUActionable:            true,
 		CurrentReplicas:          2,
 		RecommendedReplicas:      2,
 		CurrentCPURequest:        "700m",
@@ -200,6 +201,7 @@ func TestClassifyOutcomeTooAggressive(t *testing.T) {
 
 	outcome := classifyOutcome(priorRun{
 		Actionable:               true,
+		CPUActionable:            true,
 		CurrentReplicas:          2,
 		RecommendedReplicas:      2,
 		CurrentCPURequest:        "700m",
@@ -210,6 +212,40 @@ func TestClassifyOutcomeTooAggressive(t *testing.T) {
 
 	if outcome.Status != "too_aggressive" {
 		t.Fatalf("Status = %q, want too_aggressive; details=%v", outcome.Status, outcome.Details)
+	}
+}
+
+func TestClassifyOutcomeIgnoresBlockedFieldsButTracksActionableResources(t *testing.T) {
+	report := testReport()
+	workload := &report.Workloads[0]
+	workload.Recommendation.CurrentReplicas = 3
+	workload.Recommendation.CurrentCPURequest = "200m"
+	workload.Recommendation.CurrentMemoryRequest = "5092Mi"
+	workload.ReadyReplicas = 3
+	workload.Replicas = 3
+	workload.MetricsCondition = "healthy"
+
+	outcome := classifyOutcome(priorRun{
+		Actionable:               false,
+		ReplicasActionable:       false,
+		CPUActionable:            true,
+		MemoryActionable:         true,
+		CurrentReplicas:          3,
+		RecommendedReplicas:      2,
+		CurrentCPURequest:        "220m",
+		RecommendedCPURequest:    "200m",
+		CurrentMemoryRequest:     "5092Mi",
+		RecommendedMemoryRequest: "3884Mi",
+	}, workload)
+
+	if outcome.Status != "partially_applied" {
+		t.Fatalf("Status = %q, want partially_applied; details=%v", outcome.Status, outcome.Details)
+	}
+	if !contains(outcome.Details, "cpu_request_applied") {
+		t.Fatalf("details missing cpu_request_applied: %v", outcome.Details)
+	}
+	if contains(outcome.Details, "replicas_not_applied") {
+		t.Fatalf("blocked replica field should not be tracked as expected: %v", outcome.Details)
 	}
 }
 

@@ -585,9 +585,47 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_management_disabled")
 	}
 
+	applyMinimumResourceChangeThreshold(workload, &recommendation)
 	recommendation.Learning = buildLearningEvidence(workload, report, recommendation, trafficDecision, cpuDrivenReplicas, memoryDrivenReplicas)
 	recommendation.Confidence = recommendationConfidence(report, hasCPU, hasMemory, hasRequestRate)
 	return recommendation
+}
+
+func applyMinimumResourceChangeThreshold(workload config.WorkloadSpec, recommendation *Recommendation) {
+	if workload.Scaling.CPU {
+		if below, change := resourceChangeBelowThreshold(recommendation.CurrentCPURequest, recommendation.RecommendedCPURequest, workload.Bounds.CPU.MinChangePercent); below {
+			recommendation.RecommendedCPURequest = recommendation.CurrentCPURequest
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("cpu_request_change_below_min_percent:%.2f<%.2f", change, workload.Bounds.CPU.MinChangePercent))
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "cpu_request_hold_min_change_threshold")
+		}
+	}
+	if workload.Scaling.Memory {
+		if below, change := resourceChangeBelowThreshold(recommendation.CurrentMemoryRequest, recommendation.RecommendedMemoryRequest, workload.Bounds.Memory.MinChangePercent); below {
+			recommendation.RecommendedMemoryRequest = recommendation.CurrentMemoryRequest
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_request_change_below_min_percent:%.2f<%.2f", change, workload.Bounds.Memory.MinChangePercent))
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "memory_request_hold_min_change_threshold")
+		}
+	}
+}
+
+func resourceChangeBelowThreshold(current, recommended string, thresholdPercent float64) (bool, float64) {
+	if thresholdPercent <= 0 || current == "" || recommended == "" || current == recommended {
+		return false, 0
+	}
+	currentQuantity, err := resource.ParseQuantity(current)
+	if err != nil {
+		return false, 0
+	}
+	recommendedQuantity, err := resource.ParseQuantity(recommended)
+	if err != nil {
+		return false, 0
+	}
+	currentValue := math.Abs(currentQuantity.AsApproximateFloat64())
+	if currentValue <= 0 {
+		return false, 0
+	}
+	changePercent := math.Abs(recommendedQuantity.AsApproximateFloat64()-currentQuantity.AsApproximateFloat64()) / currentValue * 100
+	return changePercent < thresholdPercent, changePercent
 }
 
 func replicaFloorForResource(managed bool, replicas int32) int32 {

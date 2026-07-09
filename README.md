@@ -44,6 +44,18 @@ go run ./cmd/k8s-recommendation-engine analyze \
 The first run creates the SQLite state database and records the current learned envelopes. Later runs show prior persisted recommendation and signal counts in each workload's learning section.
 When `--state-db` is enabled, later runs also evaluate the latest prior recommendation and show `LAST OUTCOME` in summary output.
 
+## Workload Guardrails
+
+Each workload can set per-resource change bounds in its profile. `minChangePercent` suppresses CPU or memory request recommendations whose absolute change is smaller than the configured percentage of the current request, which prevents noisy proposal commits such as `76Mi -> 77Mi`.
+
+```yaml
+bounds:
+  cpu:
+    minChangePercent: 5
+  memory:
+    minChangePercent: 5
+```
+
 ## Run Continuously Without Git Changes
 
 Use `run` for controller-like continuous reconciliation in dry-run mode. This reads Kubernetes and Prometheus, records learning state when `--state-db` is set, and prints recommendations every interval. It does not patch Kubernetes and does not write to Git.

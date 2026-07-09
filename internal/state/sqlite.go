@@ -125,6 +125,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			blocked INTEGER NOT NULL,
 			recommendation_mode TEXT NOT NULL DEFAULT '',
 			recommendation_actionable INTEGER NOT NULL DEFAULT 0,
+			replicas_actionable INTEGER NOT NULL DEFAULT 0,
+			cpu_actionable INTEGER NOT NULL DEFAULT 0,
+			memory_actionable INTEGER NOT NULL DEFAULT 0,
 			reason_codes_json TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_workload_runs_lookup
@@ -202,6 +205,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "workload_runs", "recommendation_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "workload_runs", "replicas_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "workload_runs", "cpu_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "workload_runs", "memory_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
@@ -327,6 +339,9 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 				confidence,
 				recommendation_mode,
 				recommendation_actionable,
+				replicas_actionable,
+				cpu_actionable,
+				memory_actionable,
 				reason_codes_json
 			FROM workload_runs
 		WHERE application = ? AND namespace = ? AND workload_name = ?
@@ -347,6 +362,9 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 		&previous.Confidence,
 		&previous.Mode,
 		&previous.Actionable,
+		&previous.ReplicasActionable,
+		&previous.CPUActionable,
+		&previous.MemoryActionable,
 		&reasonCodesJSON,
 	)
 	if err == nil {
@@ -381,6 +399,9 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 				confidence,
 				recommendation_mode,
 				recommendation_actionable,
+				replicas_actionable,
+				cpu_actionable,
+				memory_actionable,
 				reason_codes_json
 			FROM workload_runs
 		WHERE application = ? AND namespace = ? AND workload_name = ?
@@ -407,6 +428,9 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 			&run.Confidence,
 			&run.Mode,
 			&run.Actionable,
+			&run.ReplicasActionable,
+			&run.CPUActionable,
+			&run.MemoryActionable,
 			&reasonCodesJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan recent persisted run: %w", err)
@@ -427,6 +451,9 @@ type priorRun struct {
 	GeneratedAt              *time.Time
 	Mode                     string
 	Actionable               bool
+	ReplicasActionable       bool
+	CPUActionable            bool
+	MemoryActionable         bool
 	CurrentReplicas          int32
 	RecommendedReplicas      int32
 	CurrentCPURequest        string
@@ -810,18 +837,17 @@ func classifyOutcome(previous priorRun, current *analyzer.WorkloadReport) *analy
 		CurrentMemoryRequest:             current.Recommendation.CurrentMemoryRequest,
 	}
 
-	if !previous.Actionable {
-		outcome.Status = "no_action_taken"
-		outcome.Details = append(outcome.Details, "previous recommendation was blocked or not actionable")
-		return outcome
-	}
-
-	replicasChanged := previous.CurrentReplicas != previous.RecommendedReplicas
-	cpuChanged := previous.CurrentCPURequest != previous.RecommendedCPURequest
-	memoryChanged := previous.CurrentMemoryRequest != previous.RecommendedMemoryRequest
+	replicasChanged := previous.ReplicasActionable && previous.CurrentReplicas != previous.RecommendedReplicas
+	cpuChanged := previous.CPUActionable && previous.CurrentCPURequest != previous.RecommendedCPURequest
+	memoryChanged := previous.MemoryActionable && previous.CurrentMemoryRequest != previous.RecommendedMemoryRequest
 	if !replicasChanged && !cpuChanged && !memoryChanged {
-		outcome.Status = "no_change_recommended"
-		outcome.Details = append(outcome.Details, "previous recommendation held replicas, cpu, and memory")
+		if previous.Actionable {
+			outcome.Status = "no_change_recommended"
+			outcome.Details = append(outcome.Details, "previous recommendation held all actionable fields")
+		} else {
+			outcome.Status = "no_action_taken"
+			outcome.Details = append(outcome.Details, "previous recommendation had no actionable field changes")
+		}
 		return outcome
 	}
 
@@ -1226,8 +1252,11 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 				blocked,
 				recommendation_mode,
 				recommendation_actionable,
+				replicas_actionable,
+				cpu_actionable,
+				memory_actionable,
 				reason_codes_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		application,
 		workload.Namespace,
@@ -1244,6 +1273,9 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 		boolInt(workload.Recommendation.Blocked),
 		workload.Recommendation.Mode,
 		boolInt(recommendationActionable(workload.Recommendation)),
+		boolInt(replicasActionable(workload.Recommendation)),
+		boolInt(cpuActionable(workload.Recommendation)),
+		boolInt(memoryActionable(workload.Recommendation)),
 		string(reasons),
 	)
 	if err != nil {
@@ -1343,6 +1375,31 @@ func boolInt(value bool) int {
 
 func recommendationActionable(recommendation analyzer.Recommendation) bool {
 	return recommendation.Stability != nil && recommendation.Stability.Actionable
+}
+
+func replicasActionable(recommendation analyzer.Recommendation) bool {
+	return recommendation.Stability != nil &&
+		!recommendation.Blocked &&
+		recommendation.CurrentReplicas != recommendation.RecommendedReplicas &&
+		gateActionable(recommendation.Stability.Replicas)
+}
+
+func cpuActionable(recommendation analyzer.Recommendation) bool {
+	return recommendation.Stability != nil &&
+		!recommendation.Blocked &&
+		recommendation.CurrentCPURequest != "" &&
+		recommendation.RecommendedCPURequest != "" &&
+		recommendation.CurrentCPURequest != recommendation.RecommendedCPURequest &&
+		gateActionable(recommendation.Stability.CPU)
+}
+
+func memoryActionable(recommendation analyzer.Recommendation) bool {
+	return recommendation.Stability != nil &&
+		!recommendation.Blocked &&
+		recommendation.CurrentMemoryRequest != "" &&
+		recommendation.RecommendedMemoryRequest != "" &&
+		recommendation.CurrentMemoryRequest != recommendation.RecommendedMemoryRequest &&
+		gateActionable(recommendation.Stability.Memory)
 }
 
 func sqlFinite(value float64) float64 {

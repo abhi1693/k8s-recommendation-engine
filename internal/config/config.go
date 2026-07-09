@@ -79,8 +79,9 @@ type ReplicaBounds struct {
 }
 
 type ChangeBounds struct {
-	MaxIncreasePercent int `yaml:"maxIncreasePercent" json:"maxIncreasePercent"`
-	MaxDecreasePercent int `yaml:"maxDecreasePercent" json:"maxDecreasePercent"`
+	MaxIncreasePercent int     `yaml:"maxIncreasePercent" json:"maxIncreasePercent"`
+	MaxDecreasePercent int     `yaml:"maxDecreasePercent" json:"maxDecreasePercent"`
+	MinChangePercent   float64 `yaml:"minChangePercent" json:"minChangePercent"`
 }
 
 type MetricProfile struct {
@@ -134,6 +135,12 @@ func (p *ApplicationProfile) Validate() error {
 		}
 		if _, ok := p.MetricProfiles[workload.MetricProfileRef]; !ok {
 			return fmt.Errorf("workload %s references missing metric profile %q", workload.Name, workload.MetricProfileRef)
+		}
+		if workload.Bounds.CPU.MinChangePercent < 0 {
+			return fmt.Errorf("workload %s bounds.cpu.minChangePercent must be non-negative", workload.Name)
+		}
+		if workload.Bounds.Memory.MinChangePercent < 0 {
+			return fmt.Errorf("workload %s bounds.memory.minChangePercent must be non-negative", workload.Name)
 		}
 	}
 	for _, signal := range p.Spec.SharedSignals {

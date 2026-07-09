@@ -97,6 +97,11 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 		plan.BlockReasons = append(plan.BlockReasons, "stability state is unavailable; run with --state-db before planning Git changes")
 		return plan
 	}
+	if report.Rollout.Evaluated && !report.Rollout.Settled {
+		plan.Blocked = true
+		plan.BlockReasons = append(plan.BlockReasons, "workload rollout is not settled: "+strings.Join(report.Rollout.Reasons, ", "))
+		return plan
+	}
 
 	if workload.Scaling.Replicas {
 		current, ok := scalarAt(document, "spec", "replicas")

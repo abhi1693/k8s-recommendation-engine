@@ -356,6 +356,87 @@ spec:
 	}
 }
 
+func TestAttachPatchPlansBlocksUnsettledRollout(t *testing.T) {
+	worktree := t.TempDir()
+	basePath := "shipyard"
+	sourceDir := filepath.Join(worktree, basePath)
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipyardhq
+  namespace: shipyardhq
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: web
+          resources:
+            requests:
+              cpu: 700m
+              memory: 5Gi
+`)
+	if err := os.WriteFile(filepath.Join(sourceDir, "deployment.yaml"), source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := &config.ApplicationProfile{
+		Spec: config.ApplicationSpec{
+			Namespace: "shipyardhq",
+			Git:       config.GitSpec{BasePath: basePath},
+			Workloads: []config.WorkloadSpec{
+				{
+					Name:       "web",
+					SourceFile: "deployment.yaml",
+					TargetRef:  config.TargetRef{Kind: "Deployment", Name: "shipyardhq"},
+					Scaling:    config.ScalingSpec{CPU: true},
+				},
+			},
+		},
+	}
+	report := &Report{
+		Workloads: []WorkloadReport{
+			{
+				Name: "web",
+				Containers: []ContainerReport{
+					{Name: "web"},
+				},
+				Rollout: RolloutReport{
+					Evaluated: true,
+					Settled:   false,
+					Reasons:   []string{"incomplete_init_pods:1"},
+				},
+				Recommendation: Recommendation{
+					CurrentCPURequest:     "700m",
+					RecommendedCPURequest: "490m",
+					Stability: &RecommendationStability{
+						CPU: StabilityGate{Status: "stable", Observed: 3, Required: 3},
+					},
+				},
+			},
+		},
+	}
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil {
+		t.Fatal("PatchPlan is nil")
+	}
+	if !plan.Blocked {
+		t.Fatal("PatchPlan.Blocked = false, want true")
+	}
+	if len(plan.Changes) != 0 {
+		t.Fatalf("Changes = %#v, want no changes while rollout is unsettled", plan.Changes)
+	}
+	if !containsString(strings.Join(plan.BlockReasons, "\n"), "incomplete_init_pods:1") {
+		t.Fatalf("missing rollout block reason: %#v", plan.BlockReasons)
+	}
+}
+
 func TestAttachPatchPlansBlocksMissingStability(t *testing.T) {
 	worktree := t.TempDir()
 	basePath := "shipyard"

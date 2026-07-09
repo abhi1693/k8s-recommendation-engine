@@ -316,7 +316,13 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 		return err
 	}
 	analyzer.AttachPatchPlans(options.gitWorktree, profile, report)
+	if err := state.ApplyProposalBudgets(ctx, options.stateDB, report, profile); err != nil {
+		return err
+	}
 	if err := attachProposal(ctx, options, profile, report); err != nil {
+		return err
+	}
+	if err := state.RecordProposalEvents(ctx, options.stateDB, report); err != nil {
 		return err
 	}
 

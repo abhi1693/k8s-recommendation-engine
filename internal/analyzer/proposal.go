@@ -80,7 +80,7 @@ func BuildProposal(worktree string, report *Report) *ProposalReport {
 		}
 	}
 	if len(plansByFile) == 0 {
-		proposal.Blocked = len(proposal.Errors) > 0
+		proposal.Blocked = len(proposal.Errors) > 0 || len(proposal.BlockReasons) > 0
 		return proposal
 	}
 

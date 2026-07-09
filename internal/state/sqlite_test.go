@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/abhi1693/k8s-recommendation-engine/internal/analyzer"
+	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
 )
 
 func TestAttachAndRecordPersistsPriorLearning(t *testing.T) {
@@ -524,6 +525,161 @@ func TestForecastAccuracyFeedbackAdjustsConfidenceAndResourceDecrease(t *testing
 	}
 }
 
+func TestProposalBudgetBlocksWhenHourlyLimitReached(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	if err := RecordProposalEvents(context.Background(), path, report); err != nil {
+		t.Fatal(err)
+	}
+
+	next := testProposalReport(time.Date(2026, 7, 9, 18, 30, 0, 0, time.UTC))
+	next.Proposal = nil
+	profile := &config.ApplicationProfile{
+		Spec: config.ApplicationSpec{
+			Workloads: []config.WorkloadSpec{
+				{
+					Name:   "web",
+					Policy: config.PolicySpec{MaxProposalsPerHour: 1},
+				},
+			},
+		},
+	}
+	if err := ApplyProposalBudgets(context.Background(), path, next, profile); err != nil {
+		t.Fatal(err)
+	}
+	plan := next.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || !plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want budget blocked", plan)
+	}
+	if plan.Needed {
+		t.Fatal("PatchPlan.Needed = true, want false after budget block")
+	}
+	if !containsPrefix(plan.BlockReasons, "proposal budget exhausted: 1/1 in last 1h") {
+		t.Fatalf("missing budget block reason: %#v", plan.BlockReasons)
+	}
+	if next.Workloads[0].Recommendation.RecommendedCPURequest != "490m" {
+		t.Fatalf("recommendation was changed by budget gate: %#v", next.Workloads[0].Recommendation)
+	}
+}
+
+func TestProposalBudgetIsUnlimitedWhenUnset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	if err := RecordProposalEvents(context.Background(), path, report); err != nil {
+		t.Fatal(err)
+	}
+
+	next := testProposalReport(time.Date(2026, 7, 9, 18, 1, 0, 0, time.UTC))
+	next.Proposal = nil
+	profile := &config.ApplicationProfile{
+		Spec: config.ApplicationSpec{
+			Workloads: []config.WorkloadSpec{{Name: "web"}},
+		},
+	}
+	if err := ApplyProposalBudgets(context.Background(), path, next, profile); err != nil {
+		t.Fatal(err)
+	}
+	plan := next.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || plan.Blocked {
+		t.Fatalf("PatchPlan = %#v, want unblocked with unset budget", plan)
+	}
+}
+
+func TestSeasonalityPersistsHourlyBuckets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	base := time.Date(2026, 7, 7, 14, 0, 0, 0, time.UTC)
+	for index := 0; index < 3; index++ {
+		report := seasonalTestReport(base.Add(time.Duration(index)*5*time.Minute), 10+float64(index), 0.5+float64(index)/10, 2*1024*1024*1024, 0.2)
+		if err := AttachAndRecord(context.Background(), path, report); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	current := seasonalTestReport(base.Add(7*24*time.Hour), 1, 0.1, 512*1024*1024, 0.1)
+	if err := AttachAndRecord(context.Background(), path, current); err != nil {
+		t.Fatal(err)
+	}
+	seasonality := current.Workloads[0].Recommendation.Learning.Persistent.Seasonality
+	if seasonality == nil {
+		t.Fatal("seasonality is nil")
+	}
+	if seasonality.ObservationCount == 0 {
+		t.Fatal("ObservationCount = 0, want prior observations")
+	}
+	if !containsSeasonalSignal(seasonality.Signals, "request_rate", "same_day_type_hour") {
+		t.Fatalf("missing request_rate same_day_type_hour bucket: %#v", seasonality.Signals)
+	}
+	if len(seasonality.LatencyByTrafficBand) == 0 {
+		t.Fatalf("missing latency traffic-band buckets: %#v", seasonality)
+	}
+}
+
+func TestSeasonalityFeedbackBlocksReductionsForHotHour(t *testing.T) {
+	report := seasonalTestReport(time.Date(2026, 7, 7, 14, 0, 0, 0, time.UTC), 1, 0.1, 512*1024*1024, 0.1)
+	workload := &report.Workloads[0]
+	workload.Recommendation.CurrentReplicas = 2
+	workload.Recommendation.RecommendedReplicas = 1
+	workload.Recommendation.CurrentCPURequest = "700m"
+	workload.Recommendation.RecommendedCPURequest = "400m"
+	workload.Recommendation.CurrentMemoryRequest = "1Gi"
+	workload.Recommendation.RecommendedMemoryRequest = "512Mi"
+
+	applySeasonalityFeedback(workload, &analyzer.SeasonalityLearning{
+		Enabled:          true,
+		ObservationCount: 9,
+		CurrentHour:      14,
+		CurrentDayType:   "weekday",
+		Signals: []analyzer.SeasonalSignal{
+			{Signal: "request_rate", Bucket: "same_day_type_hour", Hour: 14, DayType: "weekday", Points: 3, P95: 10, Max: 12},
+			{Signal: "cpu_usage", Bucket: "same_day_type_hour", Hour: 14, DayType: "weekday", Points: 3, P95: 0.8, Max: 1},
+			{Signal: "memory_working_set", Bucket: "same_day_type_hour", Hour: 14, DayType: "weekday", Points: 3, P95: 2 * 1024 * 1024 * 1024, Max: 3 * 1024 * 1024 * 1024},
+		},
+	})
+
+	rec := workload.Recommendation
+	if rec.RecommendedReplicas != rec.CurrentReplicas {
+		t.Fatalf("RecommendedReplicas = %d, want held at %d", rec.RecommendedReplicas, rec.CurrentReplicas)
+	}
+	if rec.RecommendedCPURequest != rec.CurrentCPURequest {
+		t.Fatalf("RecommendedCPURequest = %q, want held at %q", rec.RecommendedCPURequest, rec.CurrentCPURequest)
+	}
+	if rec.RecommendedMemoryRequest != rec.CurrentMemoryRequest {
+		t.Fatalf("RecommendedMemoryRequest = %q, want held at %q", rec.RecommendedMemoryRequest, rec.CurrentMemoryRequest)
+	}
+	if !containsPrefix(rec.ReasonCodes, "replica_scale_down_blocked_by_seasonality:") {
+		t.Fatalf("missing seasonality replica block reason: %#v", rec.ReasonCodes)
+	}
+	if !hasDecision(rec.Learning.Decisions, "seasonality.cpu") {
+		t.Fatalf("missing seasonality CPU decision: %#v", rec.Learning.Decisions)
+	}
+}
+
+func TestReplicaOutcomeFeedbackAddsReplicaComponent(t *testing.T) {
+	report := testReport()
+	workload := &report.Workloads[0]
+	workload.Recommendation.ReplicaDecision = &analyzer.ReplicaDecision{
+		RecommendedReplicas: 3,
+		Score:               0.30,
+		Basis:               "traffic_forecast",
+	}
+
+	applyReplicaOutcomeFeedback(workload, &analyzer.RecommendationOutcome{
+		Status:  "too_conservative",
+		Details: []string{"replicas_applied"},
+	})
+
+	decision := workload.Recommendation.ReplicaDecision
+	if decision == nil || decision.Score <= 0.30 {
+		t.Fatalf("ReplicaDecision = %#v, want score increased by prior outcome", decision)
+	}
+	if !containsPrefix(workload.Recommendation.ReasonCodes, "replica_signal_score_after_outcome:") {
+		t.Fatalf("missing outcome score reason: %#v", workload.Recommendation.ReasonCodes)
+	}
+	if len(decision.Components) != 1 || decision.Components[0].Name != "prior_replica_outcome" {
+		t.Fatalf("components = %#v, want prior_replica_outcome", decision.Components)
+	}
+}
+
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -536,6 +692,24 @@ func contains(values []string, want string) bool {
 func containsPrefix(values []string, prefix string) bool {
 	for _, value := range values {
 		if len(value) >= len(prefix) && value[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSeasonalSignal(signals []analyzer.SeasonalSignal, signal, bucket string) bool {
+	for _, item := range signals {
+		if item.Signal == signal && item.Bucket == bucket {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDecision(decisions []analyzer.LearnedDecision, subject string) bool {
+	for _, decision := range decisions {
+		if decision.Subject == subject {
 			return true
 		}
 	}
@@ -574,4 +748,44 @@ func testReport() *analyzer.Report {
 			},
 		},
 	}
+}
+
+func seasonalTestReport(generatedAt time.Time, requestRate, cpuUsage, memoryWorkingSet, latencyP95 float64) *analyzer.Report {
+	report := testReport()
+	report.GeneratedAt = generatedAt
+	workload := &report.Workloads[0]
+	workload.Replicas = 2
+	workload.ReadyReplicas = 2
+	workload.MetricsCondition = "healthy"
+	workload.MetricSignals = []analyzer.SignalReport{
+		{Name: "request_rate", Healthy: true, Sample: &requestRate, History: &analyzer.SignalHistory{Points: 12, P50: 1, P95: 2, Max: 3}},
+		{Name: "cpu_usage", Healthy: true, Sample: &cpuUsage, History: &analyzer.SignalHistory{Points: 12, P50: 0.1, P95: 0.2, Max: 0.3}},
+		{Name: "memory_working_set", Healthy: true, Sample: &memoryWorkingSet, History: &analyzer.SignalHistory{Points: 12, P50: 512 * 1024 * 1024, P95: 1024 * 1024 * 1024, Max: 1536 * 1024 * 1024}},
+		{Name: "latency_p95", Healthy: true, Sample: &latencyP95, History: &analyzer.SignalHistory{Points: 12, P50: 0.1, P95: 0.2, Max: 0.4}},
+	}
+	workload.Recommendation.Learning.Signals = nil
+	return report
+}
+
+func testProposalReport(generatedAt time.Time) *analyzer.Report {
+	report := testReport()
+	report.GeneratedAt = generatedAt
+	report.Workloads[0].Recommendation.Mode = "propose"
+	report.Workloads[0].Recommendation.CurrentCPURequest = "700m"
+	report.Workloads[0].Recommendation.RecommendedCPURequest = "490m"
+	report.Workloads[0].Recommendation.PatchPlan = &analyzer.PatchPlan{
+		SourceFile: "shipyard/deployment.yaml",
+		Resource:   "Deployment/shipyardhq/shipyardhq",
+		Needed:     true,
+		Changes: []analyzer.PatchChange{
+			{Field: "spec.template.spec.containers[name=web].resources.requests.cpu", Operation: "replace", Current: "700m", Recommended: "490m"},
+		},
+	}
+	report.Proposal = &analyzer.ProposalReport{
+		Mode:   "propose",
+		Kind:   "commit",
+		Needed: true,
+		Commit: "abc123",
+	}
+	return report
 }

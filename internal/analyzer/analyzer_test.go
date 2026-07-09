@@ -1,10 +1,12 @@
 package analyzer
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
+	"github.com/abhi1693/k8s-recommendation-engine/internal/prom"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -217,6 +219,51 @@ func TestBuildRecommendationDoesNotScaleUpForLowTrafficLatencySpike(t *testing.T
 	}
 	if len(got.Learning.Decisions) == 0 {
 		t.Fatal("Learning.Decisions is empty")
+	}
+}
+
+func TestBuildRecommendationUsesMultiSignalReplicaBasis(t *testing.T) {
+	latency := sampleSignalWithHistory("latency_p95", 2, SignalHistory{Points: 24, P50: 0.2, P95: 0.5, Max: 1})
+	latency.Anomaly = AnomalyStatus{State: "critical", Reason: "latency outside learned max"}
+	report := WorkloadReport{
+		Replicas: 2,
+		Containers: []ContainerReport{
+			{
+				Name:               "web",
+				CPURequest:         "500m",
+				CPURequestCores:    0.5,
+				MemoryRequest:      "1Gi",
+				MemoryRequestBytes: 1024 * 1024 * 1024,
+			},
+		},
+		MetricsCondition: "healthy",
+		MetricSignals: []SignalReport{
+			sampleSignalWithHistory("request_rate", 10, SignalHistory{Points: 24, P50: 4, P95: 8, Max: 9}),
+			latency,
+			sampleSignalWithHistory("cpu_usage", 0.2, SignalHistory{Points: 24, P50: 0.1, P95: 0.2, Max: 0.3}),
+			sampleSignalWithHistory("memory_working_set", 256*1024*1024, SignalHistory{Points: 24, P50: 128 * 1024 * 1024, P95: 256 * 1024 * 1024, Max: 512 * 1024 * 1024}),
+		},
+		Availability: AvailabilityReport{ReplicaFloor: 2},
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{Replicas: true, CPU: true, Memory: true},
+		Bounds: config.BoundsSpec{
+			Replicas: config.ReplicaBounds{Min: 1, Max: 6},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.ReplicaDecision == nil {
+		t.Fatal("ReplicaDecision is nil")
+	}
+	if got.RecommendedReplicas <= got.CurrentReplicas {
+		t.Fatalf("RecommendedReplicas = %d, want scale-up; reasons=%#v", got.RecommendedReplicas, got.ReasonCodes)
+	}
+	if !containsSubstring(got.ReplicaDecision.Basis, "traffic_forecast") || !containsSubstring(got.ReplicaDecision.Basis, "latency") || !containsSubstring(got.ReplicaDecision.Basis, "availability_floor") {
+		t.Fatalf("ReplicaDecision.Basis = %q, want traffic+latency and availability floor", got.ReplicaDecision.Basis)
+	}
+	if !hasLearnedDecision(got.Learning.Decisions, "replicas.multi_signal") {
+		t.Fatalf("missing replicas.multi_signal decision: %#v", got.Learning.Decisions)
 	}
 }
 
@@ -448,6 +495,10 @@ func hasLearnedDecision(decisions []LearnedDecision, subject string) bool {
 	return false
 }
 
+func containsSubstring(value, want string) bool {
+	return strings.Contains(value, want)
+}
+
 func TestClassifyAnomaly(t *testing.T) {
 	sample := 12.2
 	signal := SignalReport{
@@ -479,6 +530,66 @@ func TestClassifyAnomaly(t *testing.T) {
 	got = classifyAnomaly(signal)
 	if got.State != "normal" {
 		t.Fatalf("State = %q, want normal", got.State)
+	}
+}
+
+func TestBuildSignalForecastCreatesHorizonBands(t *testing.T) {
+	samples := []prom.Sample{
+		{Timestamp: 0, Value: 1},
+		{Timestamp: 3600, Value: 2},
+		{Timestamp: 7200, Value: 3},
+	}
+	current := 3.0
+	forecast := buildSignalForecast(samples, &current, SignalHistory{Points: 3, P50: 2, P95: 3, Max: 3})
+	if forecast == nil || len(forecast.Horizons) != 3 {
+		t.Fatalf("forecast = %#v, want three horizons", forecast)
+	}
+	if forecast.TrendSlopePerHour < 0.99 || forecast.TrendSlopePerHour > 1.01 {
+		t.Fatalf("TrendSlopePerHour = %.4f, want about 1", forecast.TrendSlopePerHour)
+	}
+	var oneHour ForecastHorizon
+	for _, horizon := range forecast.Horizons {
+		if horizon.Horizon == "next_1h" {
+			oneHour = horizon
+		}
+	}
+	if oneHour.Forecast < 3.99 || oneHour.Forecast > 4.01 {
+		t.Fatalf("next_1h forecast = %.4f, want about 4", oneHour.Forecast)
+	}
+	if oneHour.P95BandLow > oneHour.Forecast || oneHour.P95BandHigh < oneHour.Forecast {
+		t.Fatalf("band does not contain forecast: %#v", oneHour)
+	}
+}
+
+func TestTrafficDecisionUsesThirtyMinuteForecastBand(t *testing.T) {
+	request := 2.2
+	report := WorkloadReport{
+		Replicas: 2,
+		MetricSignals: []SignalReport{
+			{
+				Name:    "request_rate",
+				Healthy: true,
+				Sample:  &request,
+				History: &SignalHistory{Points: 24, P50: 1, P95: 2, Max: 10},
+				Forecast: &SignalForecast{Horizons: []ForecastHorizon{
+					{Horizon: "next_30m", Forecast: 7, P95BandLow: 6, P95BandHigh: 8, Confidence: 0.82},
+				}},
+			},
+			{
+				Name:    "latency_p95",
+				Healthy: true,
+				Sample:  &request,
+				Anomaly: AnomalyStatus{State: "warning", Reason: "test"},
+			},
+		},
+	}
+
+	decision := trafficReplicaDecision(report, nil, 2)
+	if decision.ForecastBasis != "next_30m_p95_band_high" {
+		t.Fatalf("ForecastBasis = %q, want next_30m_p95_band_high", decision.ForecastBasis)
+	}
+	if decision.Replicas != 3 {
+		t.Fatalf("Replicas = %d, want 3; decision=%#v", decision.Replicas, decision)
 	}
 }
 

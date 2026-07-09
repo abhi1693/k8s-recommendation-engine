@@ -107,6 +107,11 @@ func WriteTextReport(w io.Writer, report *Report) error {
 			if _, err := fmt.Fprintf(w, "        - %-32s %s\n", signal.Name, signalStatus(signal)); err != nil {
 				return err
 			}
+			if signal.Forecast != nil {
+				if _, err := fmt.Fprintf(w, "          forecast: %s\n", textForecastSummary(signal)); err != nil {
+					return err
+				}
+			}
 		}
 		if _, err := fmt.Fprintln(w, "      recommendation:"); err != nil {
 			return err
@@ -539,6 +544,11 @@ func writePrettyWorkload(w io.Writer, workload WorkloadReport) error {
 	if _, err := fmt.Fprintf(w, "    replicas: %s\n", replicaDelta(rec)); err != nil {
 		return err
 	}
+	if rec.ReplicaDecision != nil {
+		if _, err := fmt.Fprintf(w, "    replica decision: score=%.2f basis=%s floor=%d components=%s\n", rec.ReplicaDecision.Score, rec.ReplicaDecision.Basis, rec.ReplicaDecision.Floor, compactReplicaComponents(rec.ReplicaDecision.Components)); err != nil {
+			return err
+		}
+	}
 	if _, err := fmt.Fprintf(w, "    cpu request: %s\n", resourceDelta(rec.CurrentCPURequest, rec.RecommendedCPURequest)); err != nil {
 		return err
 	}
@@ -566,6 +576,9 @@ func writePrettyWorkload(w io.Writer, workload WorkloadReport) error {
 		}
 	}
 	if err := writePrettyLearning(w, rec.Learning); err != nil {
+		return err
+	}
+	if err := writePrettyForecasts(w, workload.MetricSignals); err != nil {
 		return err
 	}
 	if rec.PatchPlan != nil {
@@ -602,6 +615,11 @@ func writeTextLearning(w io.Writer, learning LearningEvidence) error {
 				return err
 			}
 		}
+		if learning.Persistent.Seasonality != nil {
+			if _, err := fmt.Fprintf(w, "          seasonality: observations=%d hour=%d dayType=%s trafficBand=%s message=%q\n", learning.Persistent.Seasonality.ObservationCount, learning.Persistent.Seasonality.CurrentHour, learning.Persistent.Seasonality.CurrentDayType, emptyDash(learning.Persistent.Seasonality.CurrentTrafficBand), learning.Persistent.Seasonality.Message); err != nil {
+				return err
+			}
+		}
 		if learning.Persistent.LastOutcome != nil {
 			if _, err := fmt.Fprintf(w, "          lastOutcome: status=%s details=%s\n", learning.Persistent.LastOutcome.Status, emptyDash(strings.Join(learning.Persistent.LastOutcome.Details, ","))); err != nil {
 				return err
@@ -611,6 +629,62 @@ func writeTextLearning(w io.Writer, learning LearningEvidence) error {
 	for _, decision := range learning.Decisions {
 		if _, err := fmt.Fprintf(w, "          - %s: %s; %s; %s\n", decision.Subject, decision.Learned, decision.Observed, decision.Conclusion); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func writePrettyForecasts(w io.Writer, signals []SignalReport) error {
+	var forecastSignals []SignalReport
+	for _, signal := range signals {
+		if signal.Forecast != nil && (len(signal.Forecast.Horizons) > 0 || len(signal.Forecast.Baselines) > 0) {
+			forecastSignals = append(forecastSignals, signal)
+		}
+	}
+	if len(forecastSignals) == 0 {
+		return nil
+	}
+	sort.SliceStable(forecastSignals, func(i, j int) bool {
+		return forecastSignals[i].Name < forecastSignals[j].Name
+	})
+	if _, err := fmt.Fprintln(w, "    forecasts:"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "      SIGNAL                    HORIZON    FORECAST     P95 BAND                 CONFIDENCE   TREND/HR"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "      ------------------------------------------------------------------------------------------------"); err != nil {
+		return err
+	}
+	for _, signal := range forecastSignals {
+		for _, horizon := range signal.Forecast.Horizons {
+			if _, err := fmt.Fprintf(w, "      %-25s %-10s %-12s %-24s %-12.2f %s\n",
+				signal.Name,
+				horizon.Horizon,
+				formatSignalValue(signal.Name, horizon.Forecast),
+				fmt.Sprintf("%s-%s", formatSignalValue(signal.Name, horizon.P95BandLow), formatSignalValue(signal.Name, horizon.P95BandHigh)),
+				horizon.Confidence,
+				formatSignalValue(signal.Name, signal.Forecast.TrendSlopePerHour),
+			); err != nil {
+				return err
+			}
+		}
+		for _, baseline := range signal.Forecast.Baselines {
+			if _, err := fmt.Fprintf(w, "        baseline %-18s p50=%s p95=%s max=%s points=%d window=%s\n",
+				baseline.Name,
+				formatSignalValue(signal.Name, baseline.P50),
+				formatSignalValue(signal.Name, baseline.P95),
+				formatSignalValue(signal.Name, baseline.Max),
+				baseline.Points,
+				baseline.Window,
+			); err != nil {
+				return err
+			}
+		}
+		if signal.Forecast.Reason != "" {
+			if _, err := fmt.Fprintf(w, "        reason %s: %s\n", signal.Name, signal.Forecast.Reason); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -656,6 +730,11 @@ func writePrettyLearning(w io.Writer, learning LearningEvidence) error {
 				if _, err := fmt.Fprintf(w, "          - %s mape=%.1f%% bias=%+.1f%% samples=%d class=%s\n", score.Signal, score.MeanAbsolutePercentError*100, score.MeanBiasPercent*100, score.Samples, score.Classification); err != nil {
 					return err
 				}
+			}
+		}
+		if learning.Persistent.Seasonality != nil {
+			if err := writePrettySeasonality(w, learning.Persistent.Seasonality); err != nil {
+				return err
 			}
 		}
 		if learning.Persistent.LastOutcome != nil {
@@ -716,6 +795,60 @@ func writePrettyLearning(w io.Writer, learning LearningEvidence) error {
 	return nil
 }
 
+func writePrettySeasonality(w io.Writer, seasonality *SeasonalityLearning) error {
+	if seasonality == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintf(w, "        seasonality: observations=%d currentHour=%d dayType=%s trafficBand=%s\n", seasonality.ObservationCount, seasonality.CurrentHour, seasonality.CurrentDayType, emptyDash(seasonality.CurrentTrafficBand)); err != nil {
+		return err
+	}
+	if seasonality.Message != "" {
+		if _, err := fmt.Fprintf(w, "          %s\n", seasonality.Message); err != nil {
+			return err
+		}
+	}
+	if len(seasonality.Signals) > 0 {
+		if _, err := fmt.Fprintln(w, "          hourly buckets:"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "            SIGNAL                    BUCKET                 POINTS   P50          P95          MAX"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "            --------------------------------------------------------------------------------"); err != nil {
+			return err
+		}
+		for _, signal := range seasonality.Signals {
+			if _, err := fmt.Fprintf(w, "            %-25s %-22s %-8d %-12s %-12s %s\n",
+				signal.Signal,
+				signal.Bucket,
+				signal.Points,
+				formatSignalValue(signal.Signal, signal.P50),
+				formatSignalValue(signal.Signal, signal.P95),
+				formatSignalValue(signal.Signal, signal.Max),
+			); err != nil {
+				return err
+			}
+		}
+	}
+	if len(seasonality.LatencyByTrafficBand) > 0 {
+		if _, err := fmt.Fprintln(w, "          latency by traffic band:"); err != nil {
+			return err
+		}
+		for _, band := range seasonality.LatencyByTrafficBand {
+			if _, err := fmt.Fprintf(w, "            - %s points=%d p50=%s p95=%s max=%s\n",
+				band.TrafficBand,
+				band.Points,
+				formatSignalValue("latency_p95", band.P50),
+				formatSignalValue("latency_p95", band.P95),
+				formatSignalValue("latency_p95", band.Max),
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func writePrettyPatchPlan(w io.Writer, plan *PatchPlan) error {
 	if _, err := fmt.Fprintf(w, "    patch plan: source=%s needed=%t blocked=%t\n", emptyDash(plan.SourceFile), plan.Needed, plan.Blocked); err != nil {
 		return err
@@ -759,6 +892,53 @@ func writePrettySignals(w io.Writer, signals []SignalReport) error {
 		}
 	}
 	return nil
+}
+
+func textForecastSummary(signal SignalReport) string {
+	if signal.Forecast == nil {
+		return "-"
+	}
+	var parts []string
+	for _, horizon := range signal.Forecast.Horizons {
+		if horizon.Horizon != "next_30m" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s forecast=%s p95_band=%s-%s confidence=%.2f",
+			horizon.Horizon,
+			formatSignalValue(signal.Name, horizon.Forecast),
+			formatSignalValue(signal.Name, horizon.P95BandLow),
+			formatSignalValue(signal.Name, horizon.P95BandHigh),
+			horizon.Confidence,
+		))
+		break
+	}
+	if signal.Forecast.TrendSlopePerHour != 0 {
+		parts = append(parts, "trend_per_hour="+formatSignalValue(signal.Name, signal.Forecast.TrendSlopePerHour))
+	}
+	for _, baseline := range signal.Forecast.Baselines {
+		parts = append(parts, fmt.Sprintf("%s_p95=%s", baseline.Name, formatSignalValue(signal.Name, baseline.P95)))
+	}
+	if len(parts) == 0 && signal.Forecast.Reason != "" {
+		return signal.Forecast.Reason
+	}
+	return strings.Join(parts, " ")
+}
+
+func compactReplicaComponents(components []ReplicaDecisionComponent) string {
+	if len(components) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(components))
+	for _, component := range components {
+		if component.Score == 0 && component.Influence == "hold" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%.2f/%s", component.Name, component.Score, component.Influence))
+	}
+	if len(parts) == 0 {
+		return "hold"
+	}
+	return strings.Join(parts, ",")
 }
 
 func writePatchPlan(w io.Writer, plan *PatchPlan) error {
@@ -838,6 +1018,12 @@ func primaryDecision(recommendation Recommendation) string {
 func replicaBasis(recommendation Recommendation) string {
 	if hasReasonPrefix(recommendation, "replica_management_disabled") {
 		return "disabled"
+	}
+	if recommendation.ReplicaDecision != nil && recommendation.ReplicaDecision.Basis != "" {
+		return recommendation.ReplicaDecision.Basis
+	}
+	if reason := reasonWithStringPrefix(recommendation, "replica_basis:"); reason != "" {
+		return strings.TrimPrefix(reason, "replica_basis:")
 	}
 	if hasReasonPrefix(recommendation, "replica_joint_optimizer_selected:") {
 		return "cost optimizer"
@@ -1023,6 +1209,15 @@ func hasReasonPrefix(recommendation Recommendation, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func reasonWithStringPrefix(recommendation Recommendation, prefix string) string {
+	for _, reason := range recommendation.ReasonCodes {
+		if strings.HasPrefix(reason, prefix) {
+			return reason
+		}
+	}
+	return ""
 }
 
 func reasonInt(recommendation Recommendation, prefix string) int32 {

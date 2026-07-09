@@ -76,7 +76,7 @@ func RecordObservation(ctx context.Context, path string, report *analyzer.Observ
 func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) error {
 	for index := range report.Workloads {
 		workload := &report.Workloads[index]
-		summary, err := s.summary(ctx, report.Application, workload)
+		summary, err := s.summary(ctx, report.Application, report.GeneratedAt, workload)
 		if err != nil {
 			return err
 		}
@@ -85,6 +85,8 @@ func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) er
 		workload.Recommendation.Learning.Persistent = summary
 		stabilizeRecommendation(workload, summary)
 		applyForecastAccuracyFeedback(workload, summary.ForecastAccuracy)
+		applyReplicaOutcomeFeedback(workload, summary.LastOutcome)
+		applySeasonalityFeedback(workload, summary.Seasonality)
 		recentRuns, err := s.recentRuns(ctx, report.Application, workload.Namespace, workload.Name, postApplyObservationCooldownRuns)
 		if err != nil {
 			return err
@@ -197,6 +199,38 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_convergence_observations_lookup
 			ON convergence_observations(application, namespace, workload_name, generated_at);`,
+		`CREATE TABLE IF NOT EXISTS proposal_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			application TEXT NOT NULL,
+			namespace TEXT NOT NULL,
+			workload_name TEXT NOT NULL,
+			deployment TEXT NOT NULL,
+			generated_at TEXT NOT NULL,
+			proposal_kind TEXT NOT NULL,
+			proposal_commit TEXT NOT NULL,
+			proposal_patch_file TEXT NOT NULL,
+			changes_count INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_proposal_events_lookup
+			ON proposal_events(application, namespace, workload_name, generated_at);`,
+		`CREATE TABLE IF NOT EXISTS seasonal_signal_observations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			application TEXT NOT NULL,
+			namespace TEXT NOT NULL,
+			workload_name TEXT NOT NULL,
+			deployment TEXT NOT NULL,
+			generated_at TEXT NOT NULL,
+			hour_of_day INTEGER NOT NULL,
+			day_of_week INTEGER NOT NULL,
+			day_type TEXT NOT NULL,
+			signal TEXT NOT NULL,
+			value REAL NOT NULL,
+			traffic_band TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_seasonal_signal_lookup
+			ON seasonal_signal_observations(application, namespace, workload_name, signal, day_type, hour_of_day);`,
+		`CREATE INDEX IF NOT EXISTS idx_seasonal_latency_band_lookup
+			ON seasonal_signal_observations(application, namespace, workload_name, signal, traffic_band, day_type, hour_of_day);`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -305,7 +339,7 @@ func (s *Store) RecordObservation(ctx context.Context, report *analyzer.Observat
 	return nil
 }
 
-func (s *Store) summary(ctx context.Context, application string, workload *analyzer.WorkloadReport) (*analyzer.PersistentLearning, error) {
+func (s *Store) summary(ctx context.Context, application string, observedAt time.Time, workload *analyzer.WorkloadReport) (*analyzer.PersistentLearning, error) {
 	summary := &analyzer.PersistentLearning{
 		Enabled: true,
 		Message: "no prior persisted recommendations for this workload",
@@ -332,6 +366,11 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 		return nil, err
 	}
 	summary.ForecastAccuracy = forecastAccuracy
+	seasonality, err := s.seasonality(ctx, application, observedAt, workload)
+	if err != nil {
+		return nil, err
+	}
+	summary.Seasonality = seasonality
 	row = s.db.QueryRowContext(ctx, `
 		SELECT
 			generated_at,
@@ -354,11 +393,11 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 		ORDER BY generated_at DESC, id DESC
 		LIMIT 1
 	`, application, workload.Namespace, workload.Name)
-	var generatedAt string
+	var generatedAtRaw string
 	var reasonCodesJSON string
 	previous := priorRun{}
 	err = row.Scan(
-		&generatedAt,
+		&generatedAtRaw,
 		&previous.CurrentReplicas,
 		&previous.RecommendedReplicas,
 		&previous.CurrentCPURequest,
@@ -376,7 +415,7 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 	)
 	if err == nil {
 		previous.ReasonCodes = decodeReasonCodes(reasonCodesJSON)
-		if parsed, parseErr := time.Parse(time.RFC3339Nano, generatedAt); parseErr == nil {
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, generatedAtRaw); parseErr == nil {
 			summary.LastObservedAt = &parsed
 			previous.GeneratedAt = &parsed
 		}
@@ -1400,6 +1439,9 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 		); err != nil {
 			return fmt.Errorf("insert forecast score: %w", err)
 		}
+	}
+	if err := s.recordSeasonalObservations(ctx, tx, application, generatedAt, workload); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit state tx: %w", err)

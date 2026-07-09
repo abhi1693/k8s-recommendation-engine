@@ -175,6 +175,11 @@ func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.Applicat
 		return WorkloadReport{}, fmt.Errorf("build availability report %s/%s: %w", profile.Spec.Namespace, workload.TargetRef.Name, err)
 	}
 	report.Availability = availability
+	rollout, err := a.rolloutReport(ctx, profile.Spec.Namespace, deployment)
+	if err != nil {
+		return WorkloadReport{}, fmt.Errorf("build rollout report %s/%s: %w", profile.Spec.Namespace, workload.TargetRef.Name, err)
+	}
+	report.Rollout = rollout
 
 	metricProfile := profile.MetricProfiles[workload.MetricProfileRef]
 	vars := workload.VarsWithDefaults(profile.Spec.Namespace)
@@ -184,6 +189,76 @@ func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.Applicat
 	report.MetricsCondition = metricCondition(report.MetricSignals)
 	report.Recommendation = buildRecommendation(workload, report, sharedSignals)
 
+	return report, nil
+}
+
+func (a *Analyzer) rolloutReport(ctx context.Context, namespace string, deployment *appsv1.Deployment) (RolloutReport, error) {
+	desired := int32(1)
+	if deployment.Spec.Replicas != nil {
+		desired = *deployment.Spec.Replicas
+	}
+	report := RolloutReport{
+		Evaluated:           true,
+		Settled:             true,
+		Generation:          deployment.Generation,
+		ObservedGeneration:  deployment.Status.ObservedGeneration,
+		DesiredReplicas:     desired,
+		UpdatedReplicas:     deployment.Status.UpdatedReplicas,
+		ReadyReplicas:       deployment.Status.ReadyReplicas,
+		AvailableReplicas:   deployment.Status.AvailableReplicas,
+		UnavailableReplicas: deployment.Status.UnavailableReplicas,
+	}
+	if report.ObservedGeneration != report.Generation {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("observed_generation_pending:%d/%d", report.ObservedGeneration, report.Generation))
+	}
+	if report.UpdatedReplicas < desired {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("updated_replicas_pending:%d/%d", report.UpdatedReplicas, desired))
+	}
+	if report.ReadyReplicas < desired {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("ready_replicas_pending:%d/%d", report.ReadyReplicas, desired))
+	}
+	if report.AvailableReplicas < desired {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("available_replicas_pending:%d/%d", report.AvailableReplicas, desired))
+	}
+	if report.UnavailableReplicas > 0 {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("unavailable_replicas:%d", report.UnavailableReplicas))
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return report, err
+	}
+	pods, err := a.kube.ListPods(ctx, namespace, selector.String())
+	if err != nil {
+		return report, err
+	}
+	for _, pod := range pods.Items {
+		switch {
+		case pod.DeletionTimestamp != nil:
+			report.TerminatingPods++
+		case pod.Status.Phase == corev1.PodPending:
+			report.PendingPods++
+		}
+		if !podReady(pod) && pod.DeletionTimestamp == nil {
+			report.UnreadyPods++
+		}
+		if podHasIncompleteInit(pod) {
+			report.IncompleteInitPods++
+		}
+	}
+	if report.TerminatingPods > 0 {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("terminating_pods:%d", report.TerminatingPods))
+	}
+	if report.PendingPods > 0 {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("pending_pods:%d", report.PendingPods))
+	}
+	if report.IncompleteInitPods > 0 {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("incomplete_init_pods:%d", report.IncompleteInitPods))
+	}
+	if report.UnreadyPods > 0 {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("unready_pods:%d", report.UnreadyPods))
+	}
+	report.Settled = len(report.Reasons) == 0
 	return report, nil
 }
 
@@ -275,6 +350,22 @@ func podReady(pod corev1.Pod) bool {
 	return false
 }
 
+func podHasIncompleteInit(pod corev1.Pod) bool {
+	if len(pod.Spec.InitContainers) == 0 {
+		return false
+	}
+	completed := map[string]bool{}
+	for _, status := range pod.Status.InitContainerStatuses {
+		completed[status.Name] = status.Ready || (status.State.Terminated != nil && status.State.Terminated.ExitCode == 0)
+	}
+	for _, container := range pod.Spec.InitContainers {
+		if !completed[container.Name] {
+			return true
+		}
+	}
+	return false
+}
+
 func derefInt32(value *int32) int32 {
 	if value == nil {
 		return 0
@@ -361,12 +452,62 @@ func (a *Analyzer) validateSignal(ctx context.Context, name string, signal confi
 		report.HistoryError = err.Error()
 		return report
 	}
-	history := summarizeHistory(rangeResult, a.options.HistoryWindow, a.options.HistoryStep)
+	samples := aggregateRangeSamples(rangeResult)
+	history := summarizeSamples(samples, a.options.HistoryWindow, a.options.HistoryStep)
 	if history != nil {
 		report.History = history
+		if forecastSignalEnabled(name) {
+			report.Forecast = buildSignalForecast(samples, report.Sample, *history)
+			a.attachForecastBaselines(ctx, rendered, end, &report)
+		}
 	}
 	report.Anomaly = classifyAnomaly(report)
 	return report
+}
+
+func forecastSignalEnabled(name string) bool {
+	switch name {
+	case "available_replicas":
+		return false
+	default:
+		return true
+	}
+}
+
+func (a *Analyzer) attachForecastBaselines(ctx context.Context, query string, end time.Time, report *SignalReport) {
+	if report.Forecast == nil {
+		report.Forecast = &SignalForecast{}
+	}
+	baselines := []struct {
+		name   string
+		offset time.Duration
+	}{
+		{name: "same_time_yesterday", offset: 24 * time.Hour},
+		{name: "same_weekday", offset: 7 * 24 * time.Hour},
+	}
+	for _, baseline := range baselines {
+		baselineEnd := end.Add(-baseline.offset)
+		baselineStart := baselineEnd.Add(-a.options.HistoryWindow)
+		result, err := a.prom.QueryRange(ctx, query, baselineStart, baselineEnd, a.options.HistoryStep)
+		if err != nil {
+			continue
+		}
+		summary := summarizeSamples(aggregateRangeSamples(result), a.options.HistoryWindow, a.options.HistoryStep)
+		if summary == nil {
+			continue
+		}
+		report.Forecast.Baselines = append(report.Forecast.Baselines, ForecastBaseline{
+			Name:   baseline.name,
+			Window: summary.Window,
+			Points: summary.Points,
+			P50:    summary.P50,
+			P95:    summary.P95,
+			Max:    summary.Max,
+		})
+	}
+	if len(report.Forecast.Horizons) == 0 && len(report.Forecast.Baselines) == 0 {
+		report.Forecast = nil
+	}
 }
 
 func containerReport(name string, requests, limits corev1.ResourceList) ContainerReport {
@@ -521,6 +662,7 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 	if trafficDecision.Replicas > 0 {
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes,
 			fmt.Sprintf("traffic_forecast:%.4g", trafficDecision.Forecast),
+			"traffic_forecast_basis:"+trafficDecision.ForecastBasis,
 			fmt.Sprintf("traffic_learned_peak_per_replica:%.4g", trafficDecision.LearnedPeakPerReplica),
 			fmt.Sprintf("traffic_pressure_multiplier:%.3g", trafficDecision.PressureMultiplier),
 			fmt.Sprintf("traffic_scale_up_allowed:%t", trafficDecision.ScaleUpAllowed),
@@ -547,9 +689,13 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 		} else if trafficDecision.Replicas > 0 {
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("traffic_hold_reference:%d", trafficDecision.Replicas))
 		}
-		rawReplicas := maxInt32(trafficFloor, replicaFloorForResource(workload.Scaling.CPU, cpuDrivenReplicas), replicaFloorForResource(workload.Scaling.Memory, memoryDrivenReplicas), int32(workload.Bounds.Replicas.Min), pdbFloor, availabilityFloor, 1)
+		replicaDecision := multiSignalReplicaDecision(workload, report, sharedSignals, trafficDecision, trafficFloor, cpuDrivenReplicas, memoryDrivenReplicas, cpuPolicy, memoryPolicy, hasCPUDecision, cpuForDecision, hasMemoryDecision, memoryForDecision, pdbFloor, availabilityFloor)
+		recommendation.ReplicaDecision = &replicaDecision
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, replicaDecisionReason(replicaDecision)...)
+		rawReplicas := replicaDecision.RecommendedReplicas
 		if workload.Bounds.Replicas.Max > 0 && rawReplicas > int32(workload.Bounds.Replicas.Max) {
 			rawReplicas = int32(workload.Bounds.Replicas.Max)
+			recommendation.ReplicaDecision.RecommendedReplicas = rawReplicas
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_recommendation_clamped_to_max")
 		}
 		capacityCeiling := maxInt32(rawReplicas, trafficDecision.Replicas, cpuDrivenReplicas, memoryDrivenReplicas, report.Replicas)
@@ -815,6 +961,14 @@ func buildLearningEvidence(workload config.WorkloadSpec, report WorkloadReport, 
 			evidence.Signals = append(evidence.Signals, learned)
 		}
 	}
+	if recommendation.ReplicaDecision != nil {
+		evidence.Decisions = append(evidence.Decisions, LearnedDecision{
+			Subject:    "replicas.multi_signal",
+			Learned:    fmt.Sprintf("score=%.3g floor=%d components=%s", recommendation.ReplicaDecision.Score, recommendation.ReplicaDecision.Floor, replicaDecisionComponentsObserved(recommendation.ReplicaDecision.Components)),
+			Observed:   "basis=" + recommendation.ReplicaDecision.Basis,
+			Conclusion: fmt.Sprintf("combined signal score recommends %d replica(s)", recommendation.ReplicaDecision.RecommendedReplicas),
+		})
+	}
 	if workload.Scaling.Replicas && traffic.Replicas > 0 {
 		conclusion := fmt.Sprintf("traffic needs %d replica(s)", traffic.Replicas)
 		if !traffic.ScaleUpAllowed && traffic.Replicas >= report.Replicas {
@@ -826,7 +980,7 @@ func buildLearningEvidence(workload config.WorkloadSpec, report WorkloadReport, 
 		evidence.Decisions = append(evidence.Decisions, LearnedDecision{
 			Subject:    "replicas.traffic",
 			Learned:    fmt.Sprintf("peak_per_replica=%.4g scale_up_allowed=%t", traffic.LearnedPeakPerReplica, traffic.ScaleUpAllowed),
-			Observed:   fmt.Sprintf("forecast=%.4g pressure_multiplier=%.3g", traffic.Forecast, traffic.PressureMultiplier),
+			Observed:   fmt.Sprintf("forecast=%.4g basis=%s pressure_multiplier=%.3g", traffic.Forecast, traffic.ForecastBasis, traffic.PressureMultiplier),
 			Conclusion: conclusion,
 		})
 	}
@@ -903,6 +1057,17 @@ func availabilityObserved(availability AvailabilityReport) string {
 	}
 	if len(availability.Reasons) > 0 {
 		parts = append(parts, "reasons="+strings.Join(availability.Reasons, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+func replicaDecisionComponentsObserved(components []ReplicaDecisionComponent) string {
+	if len(components) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(components))
+	for _, component := range components {
+		parts = append(parts, fmt.Sprintf("%s:score=%.3g,replicas=%d,influence=%s", component.Name, component.Score, component.Replicas, component.Influence))
 	}
 	return strings.Join(parts, " ")
 }
@@ -1003,9 +1168,214 @@ func resourceDownscaleAllowed(signals []SignalReport, name string) bool {
 type trafficDecision struct {
 	Replicas              int32
 	Forecast              float64
+	ForecastBasis         string
 	LearnedPeakPerReplica float64
 	PressureMultiplier    float64
 	ScaleUpAllowed        bool
+}
+
+func multiSignalReplicaDecision(workload config.WorkloadSpec, report WorkloadReport, sharedSignals []SignalReport, traffic trafficDecision, trafficFloor, cpuReplicas, memoryReplicas int32, cpuPolicy, memoryPolicy resourcePolicy, hasCPU bool, cpuDemand float64, hasMemory bool, memoryDemand float64, pdbFloor, availabilityFloor int32) ReplicaDecision {
+	current := maxInt32(report.Replicas, 1)
+	configFloor := int32(workload.Bounds.Replicas.Min)
+	floor := maxInt32(configFloor, pdbFloor, availabilityFloor, 1)
+	decision := ReplicaDecision{
+		RecommendedReplicas: current,
+		Floor:               floor,
+	}
+	if configFloor > 0 {
+		decision.FloorReasons = append(decision.FloorReasons, fmt.Sprintf("configured_min:%d", configFloor))
+	}
+	if pdbFloor > 0 {
+		decision.FloorReasons = append(decision.FloorReasons, fmt.Sprintf("pdb:%d", pdbFloor))
+	}
+	if availabilityFloor > 0 {
+		decision.FloorReasons = append(decision.FloorReasons, fmt.Sprintf("availability:%d", availabilityFloor))
+	}
+
+	trafficComponent := trafficReplicaComponent(traffic, current)
+	if trafficComponent.Name != "" {
+		decision.Components = append(decision.Components, trafficComponent)
+	}
+	if component, ok := anomalyReplicaComponent(report.MetricSignals, "latency_p95", "latency", current); ok {
+		decision.Components = append(decision.Components, component)
+	}
+	if component, ok := anomalyReplicaComponent(report.MetricSignals, "error_rate", "error_rate", current); ok {
+		decision.Components = append(decision.Components, component)
+	}
+	if component, ok := anomalyReplicaComponent(sharedSignals, "concurrent_requests", "concurrent_requests", current); ok {
+		decision.Components = append(decision.Components, component)
+	}
+	if component, ok := resourceReplicaComponent("cpu", cpuReplicas, current, hasCPU, cpuDemand, cpuPolicy.TargetUtilization); ok {
+		decision.Components = append(decision.Components, component)
+	}
+	if component, ok := resourceReplicaComponent("memory", memoryReplicas, current, hasMemory, memoryDemand, memoryPolicy.TargetUtilization); ok {
+		decision.Components = append(decision.Components, component)
+	}
+	if trafficFloor > 0 {
+		decision.Components = append(decision.Components, ReplicaDecisionComponent{
+			Name:      "traffic_floor",
+			Score:     0.45,
+			Replicas:  trafficFloor,
+			Basis:     "traffic_scale_up_floor",
+			Influence: "floor",
+		})
+	}
+	if floor > 1 {
+		decision.Components = append(decision.Components, ReplicaDecisionComponent{
+			Name:      "availability_floor",
+			Score:     0,
+			Replicas:  floor,
+			Basis:     strings.Join(decision.FloorReasons, "+"),
+			Influence: "floor",
+		})
+	}
+
+	var score float64
+	highestPressureReplicas := floor
+	lowestResourceReplicas := maxInt32(floor, replicaFloorForResource(workload.Scaling.CPU, cpuReplicas), replicaFloorForResource(workload.Scaling.Memory, memoryReplicas))
+	if lowestResourceReplicas == 0 {
+		lowestResourceReplicas = floor
+	}
+	for _, component := range decision.Components {
+		score += component.Score
+		if component.Score > 0 && component.Replicas > highestPressureReplicas {
+			highestPressureReplicas = component.Replicas
+		}
+	}
+	decision.Score = clampFloat(score, -1.5, 1.5)
+	switch {
+	case decision.Score >= 0.25:
+		decision.RecommendedReplicas = maxInt32(current, highestPressureReplicas, floor)
+	case decision.Score <= -0.05:
+		decision.RecommendedReplicas = maxInt32(lowestResourceReplicas, floor)
+	default:
+		decision.RecommendedReplicas = maxInt32(current, floor)
+	}
+	decision.Basis = replicaDecisionBasis(decision)
+	return decision
+}
+
+func trafficReplicaComponent(traffic trafficDecision, current int32) ReplicaDecisionComponent {
+	if traffic.Replicas <= 0 || traffic.LearnedPeakPerReplica <= 0 {
+		return ReplicaDecisionComponent{}
+	}
+	score := 0.0
+	influence := "hold"
+	if traffic.ScaleUpAllowed {
+		score = 0.25
+		influence = "pressure"
+	} else if traffic.Replicas < current {
+		score = -0.12
+		influence = "waste"
+	}
+	return ReplicaDecisionComponent{
+		Name:      "traffic_forecast",
+		Score:     score,
+		Replicas:  traffic.Replicas,
+		Basis:     traffic.ForecastBasis,
+		Observed:  fmt.Sprintf("forecast=%.4g pressure_multiplier=%.3g", traffic.Forecast, traffic.PressureMultiplier),
+		Influence: influence,
+	}
+}
+
+func anomalyReplicaComponent(signals []SignalReport, signalName, componentName string, current int32) (ReplicaDecisionComponent, bool) {
+	for _, signal := range signals {
+		if signal.Name != signalName || signal.Sample == nil {
+			continue
+		}
+		score := 0.0
+		influence := "hold"
+		switch signal.Anomaly.State {
+		case "critical":
+			score = 0.35
+			influence = "pressure"
+		case "warning":
+			score = 0.18
+			influence = "pressure"
+		case "normal":
+			if signal.History != nil && signal.History.P50 > 0 && *signal.Sample < signal.History.P50 {
+				score = -0.05
+				influence = "waste"
+			}
+		}
+		replicas := current
+		if score >= 0.30 {
+			replicas = current + 1
+		}
+		return ReplicaDecisionComponent{
+			Name:      componentName,
+			Score:     score,
+			Replicas:  replicas,
+			Basis:     signal.Anomaly.State,
+			Observed:  fmt.Sprintf("current=%s", formatSignalValue(signal.Name, *signal.Sample)),
+			Influence: influence,
+		}, true
+	}
+	return ReplicaDecisionComponent{}, false
+}
+
+func resourceReplicaComponent(name string, replicas, current int32, hasDemand bool, demand, targetUtilization float64) (ReplicaDecisionComponent, bool) {
+	if !hasDemand || replicas <= 0 {
+		return ReplicaDecisionComponent{}, false
+	}
+	score := 0.0
+	influence := "hold"
+	switch {
+	case replicas > current:
+		score = 0.30
+		influence = "pressure"
+	case replicas < current:
+		score = -0.10
+		influence = "waste"
+	}
+	return ReplicaDecisionComponent{
+		Name:      name + "_pressure",
+		Score:     score,
+		Replicas:  replicas,
+		Basis:     "learned_p95_target",
+		Observed:  fmt.Sprintf("demand=%.4g target_utilization=%.2f", demand, targetUtilization),
+		Influence: influence,
+	}, true
+}
+
+func replicaDecisionReason(decision ReplicaDecision) []string {
+	reasons := []string{
+		fmt.Sprintf("replica_basis:%s", decision.Basis),
+		fmt.Sprintf("replica_signal_score:%.3g", decision.Score),
+	}
+	for _, component := range decision.Components {
+		reasons = append(reasons, fmt.Sprintf("replica_signal_component:%s score=%.3g replicas=%d influence=%s basis=%s observed=%s", component.Name, component.Score, component.Replicas, component.Influence, component.Basis, component.Observed))
+	}
+	return reasons
+}
+
+func replicaDecisionBasis(decision ReplicaDecision) string {
+	var pressure []string
+	var floors []string
+	var waste []string
+	for _, component := range decision.Components {
+		switch component.Influence {
+		case "pressure":
+			pressure = append(pressure, component.Name)
+		case "floor":
+			floors = append(floors, component.Name)
+		case "waste":
+			waste = append(waste, component.Name)
+		}
+	}
+	if len(pressure) > 0 && len(floors) > 0 {
+		return strings.Join(pressure, "+") + ", " + strings.Join(floors, "+")
+	}
+	if len(pressure) > 0 {
+		return strings.Join(pressure, "+")
+	}
+	if len(floors) > 0 {
+		return strings.Join(floors, "+")
+	}
+	if len(waste) > 0 {
+		return "low " + strings.Join(waste, "+")
+	}
+	return "hold"
 }
 
 func trafficReplicaDecision(report WorkloadReport, sharedSignals []SignalReport, replicas float64) trafficDecision {
@@ -1021,6 +1391,13 @@ func trafficReplicaDecision(report WorkloadReport, sharedSignals []SignalReport,
 	}
 
 	baseForecast := math.Max(requestRate, history.P95)
+	forecastBasis := "max_current_or_history_p95"
+	if horizon, ok := signalForecastHorizon(report.MetricSignals, "request_rate", "next_30m"); ok {
+		if horizon.P95BandHigh > baseForecast {
+			baseForecast = horizon.P95BandHigh
+			forecastBasis = "next_30m_p95_band_high"
+		}
+	}
 	pressureMultiplier := workloadPressureMultiplier(report.MetricSignals) * sharedPressureMultiplier(sharedSignals)
 	scaleUpAllowed := trafficScaleUpAllowed(report.MetricSignals, sharedSignals, requestRate, history)
 	forecast := baseForecast
@@ -1036,10 +1413,25 @@ func trafficReplicaDecision(report WorkloadReport, sharedSignals []SignalReport,
 	return trafficDecision{
 		Replicas:              replicasNeeded,
 		Forecast:              forecast,
+		ForecastBasis:         forecastBasis,
 		LearnedPeakPerReplica: learnedPeakPerReplica,
 		PressureMultiplier:    pressureMultiplier,
 		ScaleUpAllowed:        scaleUpAllowed,
 	}
+}
+
+func signalForecastHorizon(signals []SignalReport, name, horizonName string) (ForecastHorizon, bool) {
+	for _, signal := range signals {
+		if signal.Name != name || signal.Forecast == nil {
+			continue
+		}
+		for _, horizon := range signal.Forecast.Horizons {
+			if horizon.Horizon == horizonName {
+				return horizon, true
+			}
+		}
+	}
+	return ForecastHorizon{}, false
 }
 
 func trafficScaleUpAllowed(workloadSignals, sharedSignals []SignalReport, requestRate float64, history *SignalHistory) bool {
@@ -1176,12 +1568,36 @@ func classifyAnomaly(signal SignalReport) AnomalyStatus {
 }
 
 func summarizeHistory(result *prom.RangeQueryResult, window, step time.Duration) *SignalHistory {
-	var values []float64
+	return summarizeSamples(aggregateRangeSamples(result), window, step)
+}
+
+func aggregateRangeSamples(result *prom.RangeQueryResult) []prom.Sample {
+	if result == nil {
+		return nil
+	}
+	byTimestamp := map[float64]float64{}
 	for _, series := range result.Series {
 		for _, sample := range series.Values {
 			if !math.IsNaN(sample.Value) && !math.IsInf(sample.Value, 0) {
-				values = append(values, sample.Value)
+				byTimestamp[sample.Timestamp] += sample.Value
 			}
+		}
+	}
+	samples := make([]prom.Sample, 0, len(byTimestamp))
+	for timestamp, value := range byTimestamp {
+		samples = append(samples, prom.Sample{Timestamp: timestamp, Value: value})
+	}
+	sort.Slice(samples, func(i, j int) bool {
+		return samples[i].Timestamp < samples[j].Timestamp
+	})
+	return samples
+}
+
+func summarizeSamples(samples []prom.Sample, window, step time.Duration) *SignalHistory {
+	var values []float64
+	for _, sample := range samples {
+		if !math.IsNaN(sample.Value) && !math.IsInf(sample.Value, 0) {
+			values = append(values, sample.Value)
 		}
 	}
 	if len(values) == 0 {
@@ -1197,6 +1613,121 @@ func summarizeHistory(result *prom.RangeQueryResult, window, step time.Duration)
 		P95:    percentile(values, 0.95),
 		Max:    values[len(values)-1],
 	}
+}
+
+func buildSignalForecast(samples []prom.Sample, current *float64, history SignalHistory) *SignalForecast {
+	recent := recentForecastSamples(samples, 24)
+	if len(recent) < 3 {
+		return &SignalForecast{Reason: "insufficient_recent_samples_for_trend"}
+	}
+	slope, residuals := linearTrend(recent)
+	lastValue := recent[len(recent)-1].Value
+	if current != nil && !math.IsNaN(*current) && !math.IsInf(*current, 0) {
+		lastValue = *current
+	}
+	residualP95 := percentileAbs(residuals, 0.95)
+	historyBand := math.Max(0, history.P95-history.P50)
+	horizons := []time.Duration{15 * time.Minute, 30 * time.Minute, time.Hour}
+	forecast := &SignalForecast{
+		TrendSlopePerHour: slope,
+	}
+	for _, horizon := range horizons {
+		hours := horizon.Hours()
+		value := math.Max(0, lastValue+slope*hours)
+		band := maxFloat64(residualP95, historyBand*0.50, math.Abs(value)*0.10)
+		confidence := forecastConfidence(len(recent), band, value)
+		forecast.Horizons = append(forecast.Horizons, ForecastHorizon{
+			Horizon:     "next_" + formatDuration(horizon),
+			Forecast:    value,
+			P95BandLow:  math.Max(0, value-band),
+			P95BandHigh: value + band,
+			Confidence:  confidence,
+		})
+	}
+	return forecast
+}
+
+func recentForecastSamples(samples []prom.Sample, limit int) []prom.Sample {
+	var filtered []prom.Sample
+	for _, sample := range samples {
+		if !math.IsNaN(sample.Value) && !math.IsInf(sample.Value, 0) {
+			filtered = append(filtered, sample)
+		}
+	}
+	if len(filtered) <= limit {
+		return filtered
+	}
+	return filtered[len(filtered)-limit:]
+}
+
+func linearTrend(samples []prom.Sample) (float64, []float64) {
+	if len(samples) < 2 {
+		return 0, nil
+	}
+	base := samples[0].Timestamp
+	var sumX, sumY float64
+	for _, sample := range samples {
+		x := (sample.Timestamp - base) / 3600
+		sumX += x
+		sumY += sample.Value
+	}
+	meanX := sumX / float64(len(samples))
+	meanY := sumY / float64(len(samples))
+	var numerator, denominator float64
+	for _, sample := range samples {
+		x := (sample.Timestamp - base) / 3600
+		numerator += (x - meanX) * (sample.Value - meanY)
+		denominator += (x - meanX) * (x - meanX)
+	}
+	slope := 0.0
+	if denominator > 0 {
+		slope = numerator / denominator
+	}
+	intercept := meanY - slope*meanX
+	residuals := make([]float64, 0, len(samples))
+	for _, sample := range samples {
+		x := (sample.Timestamp - base) / 3600
+		predicted := intercept + slope*x
+		residuals = append(residuals, sample.Value-predicted)
+	}
+	return slope, residuals
+}
+
+func percentileAbs(values []float64, quantile float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	absolute := make([]float64, 0, len(values))
+	for _, value := range values {
+		if !math.IsNaN(value) && !math.IsInf(value, 0) {
+			absolute = append(absolute, math.Abs(value))
+		}
+	}
+	if len(absolute) == 0 {
+		return 0
+	}
+	sort.Float64s(absolute)
+	return percentile(absolute, quantile)
+}
+
+func forecastConfidence(points int, band, forecast float64) float64 {
+	pointScore := math.Min(float64(points)/24, 1) * 0.25
+	relativeBand := band / math.Max(1, math.Abs(forecast))
+	bandPenalty := math.Min(relativeBand, 0.45)
+	return clampFloat(0.65+pointScore-bandPenalty, 0.05, 0.99)
+}
+
+func maxFloat64(values ...float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	maximum := values[0]
+	for _, value := range values[1:] {
+		if value > maximum {
+			maximum = value
+		}
+	}
+	return maximum
 }
 
 func formatDuration(duration time.Duration) string {

@@ -410,6 +410,33 @@ spec:
 	}
 }
 
+func TestBuildProposalMarksBlockedWhenOnlyPlansAreBlocked(t *testing.T) {
+	report := &Report{
+		Application: "shipyard",
+		Workloads: []WorkloadReport{
+			{
+				Namespace:  "shipyardhq",
+				Deployment: "shipyardhq",
+				Recommendation: Recommendation{PatchPlan: &PatchPlan{
+					SourceFile:   "apps/deployment.yaml",
+					Resource:     "Deployment/shipyardhq/shipyardhq",
+					Needed:       false,
+					Blocked:      true,
+					BlockReasons: []string{"workload rollout is not settled: incomplete_init_pods:1"},
+				}},
+			},
+		},
+	}
+
+	proposal := BuildProposal(t.TempDir(), report)
+	if !proposal.Blocked {
+		t.Fatalf("proposal.Blocked = false, want true: %#v", proposal)
+	}
+	if len(proposal.BlockReasons) != 1 {
+		t.Fatalf("BlockReasons = %#v, want blocked plan reason", proposal.BlockReasons)
+	}
+}
+
 func TestBlockingGitStatusLinesIgnoresProposalArtifacts(t *testing.T) {
 	status := "?? .k8s-recommendation-engine/\n M kubernetes/app.yaml\n?? notes.txt\n"
 	dirty := blockingGitStatusLines(status)

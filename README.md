@@ -44,6 +44,56 @@ go run ./cmd/k8s-recommendation-engine analyze \
 The first run creates the SQLite state database and records the current learned envelopes. Later runs show prior persisted recommendation and signal counts in each workload's learning section.
 When `--state-db` is enabled, later runs also evaluate the latest prior recommendation and show `LAST OUTCOME` in summary output.
 
+## Forecast Horizons
+
+For forecastable signals, the analyzer computes explicit horizons from the Prometheus range samples:
+
+- `next_15m`
+- `next_30m`
+- `next_1h`
+- `same_time_yesterday` baseline
+- `same_weekday` baseline
+- rolling trend slope per hour
+
+The `next_30m` request-rate upper band is used as a proactive traffic input for replica planning. The engine still requires the normal anomaly, pressure, stability, rollout, and proposal gates before a Git proposal is allowed.
+
+Pretty reports render this as:
+
+```text
+forecast: next_30m request_rate=4.2 p95_band=3.1-5.0 confidence=0.82
+```
+
+## Seasonality Learning
+
+When `--state-db` is enabled, each reconcile stores workload signal observations in SQLite hourly buckets:
+
+- traffic p50/p95/max by hour
+- CPU p50/p95/max by hour
+- memory p50/p95/max by hour
+- latency p50/p95/max by traffic band
+- same day-of-week and weekday/weekend buckets
+
+Seasonality is used conservatively. It can hold replica, CPU, or memory reductions when the current hour's historical p95 is materially higher than the current learned envelope. This prevents scale-down decisions from being based only on a quiet moment right before a recurring busy period.
+
+## Multi-Signal Replica Decisions
+
+Replica count is decided by a combined score rather than a single metric. The scorer considers:
+
+- traffic forecast
+- latency pressure
+- error rate pressure
+- concurrent request pressure
+- CPU pressure
+- memory pressure
+- rollout, PDB, configured minimum, and availability floors
+- prior success or failure of replica recommendations recorded in SQLite
+
+The report exposes the score, basis, floor, and contributing components. Example:
+
+```text
+replica decision: score=0.60 basis=traffic_forecast+latency, availability_floor floor=2 components=traffic_forecast=0.25/pressure,latency=0.35/pressure,availability_floor=0.00/floor
+```
+
 ## Workload Guardrails
 
 Each workload can set per-resource change bounds in its profile. `minChangePercent` suppresses CPU or memory request recommendations whose absolute change is smaller than the configured percentage of the current request, which prevents noisy proposal commits such as `76Mi -> 77Mi`.
@@ -55,6 +105,18 @@ bounds:
   memory:
     minChangePercent: 5
 ```
+
+`minChangePercent` is a proposal gate, not a step size. The engine still computes the learned target from observed history and prior accuracy; it only suppresses writing a Git proposal when the difference from the current request is too small to be worth rolling out.
+
+Proposal frequency can also be limited per workload. Unset or `0` means unlimited for that limit.
+
+```yaml
+policy:
+  maxProposalsPerHour: 1
+  maxProposalsPerDay: 4
+```
+
+Before writing a proposal, the engine also checks the live Deployment rollout state. A proposal is blocked while the Deployment generation is still pending, updated/ready/available replicas have not caught up, unavailable replicas exist, or selected Pods are terminating, pending, unready, or have incomplete init containers. This prevents the controller from stacking new recommendations on top of an app that Fleet or Kubernetes has not finished applying yet.
 
 ## Run Continuously Without Git Changes
 

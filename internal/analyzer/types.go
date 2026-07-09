@@ -48,6 +48,7 @@ type WorkloadReport struct {
 	Autoscalers      []Autoscaler       `json:"autoscalers,omitempty"`
 	PDBs             []PDBReport        `json:"pdbs,omitempty"`
 	Availability     AvailabilityReport `json:"availability"`
+	Rollout          RolloutReport      `json:"rollout"`
 	CommitBlocked    bool               `json:"commitBlocked"`
 	BlockReasons     []string           `json:"blockReasons,omitempty"`
 	MetricProfile    string             `json:"metricProfile"`
@@ -100,18 +101,36 @@ type AvailabilityReport struct {
 	Reasons                      []string `json:"reasons,omitempty"`
 }
 
+type RolloutReport struct {
+	Evaluated           bool     `json:"evaluated"`
+	Settled             bool     `json:"settled"`
+	Generation          int64    `json:"generation"`
+	ObservedGeneration  int64    `json:"observedGeneration"`
+	DesiredReplicas     int32    `json:"desiredReplicas"`
+	UpdatedReplicas     int32    `json:"updatedReplicas"`
+	ReadyReplicas       int32    `json:"readyReplicas"`
+	AvailableReplicas   int32    `json:"availableReplicas"`
+	UnavailableReplicas int32    `json:"unavailableReplicas"`
+	TerminatingPods     int      `json:"terminatingPods"`
+	PendingPods         int      `json:"pendingPods"`
+	IncompleteInitPods  int      `json:"incompleteInitPods"`
+	UnreadyPods         int      `json:"unreadyPods"`
+	Reasons             []string `json:"reasons,omitempty"`
+}
+
 type SignalReport struct {
-	Name         string         `json:"name"`
-	Required     bool           `json:"required"`
-	Healthy      bool           `json:"healthy"`
-	Anomaly      AnomalyStatus  `json:"anomaly"`
-	Series       int            `json:"series"`
-	Sample       *float64       `json:"sample,omitempty"`
-	Query        string         `json:"query"`
-	Error        string         `json:"error,omitempty"`
-	ResultType   string         `json:"resultType,omitempty"`
-	History      *SignalHistory `json:"history,omitempty"`
-	HistoryError string         `json:"historyError,omitempty"`
+	Name         string          `json:"name"`
+	Required     bool            `json:"required"`
+	Healthy      bool            `json:"healthy"`
+	Anomaly      AnomalyStatus   `json:"anomaly"`
+	Series       int             `json:"series"`
+	Sample       *float64        `json:"sample,omitempty"`
+	Query        string          `json:"query"`
+	Error        string          `json:"error,omitempty"`
+	ResultType   string          `json:"resultType,omitempty"`
+	History      *SignalHistory  `json:"history,omitempty"`
+	HistoryError string          `json:"historyError,omitempty"`
+	Forecast     *SignalForecast `json:"forecast,omitempty"`
 }
 
 type AnomalyStatus struct {
@@ -129,6 +148,30 @@ type SignalHistory struct {
 	Max    float64 `json:"max"`
 }
 
+type SignalForecast struct {
+	TrendSlopePerHour float64            `json:"trendSlopePerHour"`
+	Horizons          []ForecastHorizon  `json:"horizons,omitempty"`
+	Baselines         []ForecastBaseline `json:"baselines,omitempty"`
+	Reason            string             `json:"reason,omitempty"`
+}
+
+type ForecastHorizon struct {
+	Horizon     string  `json:"horizon"`
+	Forecast    float64 `json:"forecast"`
+	P95BandLow  float64 `json:"p95BandLow"`
+	P95BandHigh float64 `json:"p95BandHigh"`
+	Confidence  float64 `json:"confidence"`
+}
+
+type ForecastBaseline struct {
+	Name   string  `json:"name"`
+	Window string  `json:"window"`
+	Points int     `json:"points"`
+	P50    float64 `json:"p50"`
+	P95    float64 `json:"p95"`
+	Max    float64 `json:"max"`
+}
+
 type Recommendation struct {
 	Mode                     string                   `json:"mode"`
 	CurrentReplicas          int32                    `json:"currentReplicas"`
@@ -139,6 +182,7 @@ type Recommendation struct {
 	RecommendedMemoryRequest string                   `json:"recommendedMemoryRequest,omitempty"`
 	Confidence               float64                  `json:"confidence"`
 	Learning                 LearningEvidence         `json:"learning"`
+	ReplicaDecision          *ReplicaDecision         `json:"replicaDecision,omitempty"`
 	ReasonCodes              []string                 `json:"reasonCodes,omitempty"`
 	Blocked                  bool                     `json:"blocked"`
 	BlockReasons             []string                 `json:"blockReasons,omitempty"`
@@ -160,6 +204,24 @@ type StabilityGate struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
+type ReplicaDecision struct {
+	RecommendedReplicas int32                      `json:"recommendedReplicas"`
+	Score               float64                    `json:"score"`
+	Basis               string                     `json:"basis"`
+	Floor               int32                      `json:"floor"`
+	FloorReasons        []string                   `json:"floorReasons,omitempty"`
+	Components          []ReplicaDecisionComponent `json:"components,omitempty"`
+}
+
+type ReplicaDecisionComponent struct {
+	Name      string  `json:"name"`
+	Score     float64 `json:"score"`
+	Replicas  int32   `json:"replicas,omitempty"`
+	Basis     string  `json:"basis,omitempty"`
+	Observed  string  `json:"observed,omitempty"`
+	Influence string  `json:"influence,omitempty"`
+}
+
 type LearningEvidence struct {
 	Mode        string              `json:"mode"`
 	Description string              `json:"description"`
@@ -173,12 +235,47 @@ type PersistentLearning struct {
 	PriorRecommendationRuns      int                    `json:"priorRecommendationRuns"`
 	PriorSignalObservations      int                    `json:"priorSignalObservations"`
 	ForecastAccuracy             *ForecastAccuracy      `json:"forecastAccuracy,omitempty"`
+	Seasonality                  *SeasonalityLearning   `json:"seasonality,omitempty"`
 	LastObservedAt               *time.Time             `json:"lastObservedAt,omitempty"`
 	LastRecommendedReplicas      int32                  `json:"lastRecommendedReplicas,omitempty"`
 	LastRecommendedCPURequest    string                 `json:"lastRecommendedCpuRequest,omitempty"`
 	LastRecommendedMemoryRequest string                 `json:"lastRecommendedMemoryRequest,omitempty"`
 	LastOutcome                  *RecommendationOutcome `json:"lastOutcome,omitempty"`
 	Message                      string                 `json:"message"`
+}
+
+type SeasonalityLearning struct {
+	Enabled              bool                  `json:"enabled"`
+	ObservationCount     int                   `json:"observationCount"`
+	CurrentHour          int                   `json:"currentHour"`
+	CurrentDayOfWeek     int                   `json:"currentDayOfWeek"`
+	CurrentDayType       string                `json:"currentDayType"`
+	CurrentTrafficBand   string                `json:"currentTrafficBand,omitempty"`
+	Signals              []SeasonalSignal      `json:"signals,omitempty"`
+	LatencyByTrafficBand []SeasonalLatencyBand `json:"latencyByTrafficBand,omitempty"`
+	Message              string                `json:"message"`
+}
+
+type SeasonalSignal struct {
+	Signal    string  `json:"signal"`
+	Bucket    string  `json:"bucket"`
+	Hour      int     `json:"hour"`
+	DayOfWeek int     `json:"dayOfWeek,omitempty"`
+	DayType   string  `json:"dayType,omitempty"`
+	Points    int     `json:"points"`
+	P50       float64 `json:"p50"`
+	P95       float64 `json:"p95"`
+	Max       float64 `json:"max"`
+}
+
+type SeasonalLatencyBand struct {
+	TrafficBand string  `json:"trafficBand"`
+	Hour        int     `json:"hour"`
+	DayType     string  `json:"dayType"`
+	Points      int     `json:"points"`
+	P50         float64 `json:"p50"`
+	P95         float64 `json:"p95"`
+	Max         float64 `json:"max"`
 }
 
 type ForecastAccuracy struct {

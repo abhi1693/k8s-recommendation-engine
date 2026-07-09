@@ -44,6 +44,25 @@ func (signal LearnedSignal) MarshalJSON() ([]byte, error) {
 	return json.Marshal(output)
 }
 
+type seasonalSignalJSON SeasonalSignal
+
+func (signal SeasonalSignal) MarshalJSON() ([]byte, error) {
+	output := struct {
+		seasonalSignalJSON
+		P50Display string `json:"p50Display,omitempty"`
+		P95Display string `json:"p95Display,omitempty"`
+		MaxDisplay string `json:"maxDisplay,omitempty"`
+	}{
+		seasonalSignalJSON: seasonalSignalJSON(signal),
+	}
+	if isByteSignal(signal.Signal) {
+		output.P50Display = formatSignalValue(signal.Signal, signal.P50)
+		output.P95Display = formatSignalValue(signal.Signal, signal.P95)
+		output.MaxDisplay = formatSignalValue(signal.Signal, signal.Max)
+	}
+	return json.Marshal(output)
+}
+
 type containerReportJSON ContainerReport
 
 func (container ContainerReport) MarshalJSON() ([]byte, error) {

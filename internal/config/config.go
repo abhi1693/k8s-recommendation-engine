@@ -50,6 +50,7 @@ type WorkloadSpec struct {
 	MetricProfileRef string            `yaml:"metricProfileRef" json:"metricProfileRef"`
 	Scaling          ScalingSpec       `yaml:"scaling" json:"scaling"`
 	Bounds           BoundsSpec        `yaml:"bounds" json:"bounds"`
+	Policy           PolicySpec        `yaml:"policy" json:"policy"`
 	Vars             map[string]string `yaml:"vars" json:"vars"`
 }
 
@@ -82,6 +83,11 @@ type ChangeBounds struct {
 	MaxIncreasePercent int     `yaml:"maxIncreasePercent" json:"maxIncreasePercent"`
 	MaxDecreasePercent int     `yaml:"maxDecreasePercent" json:"maxDecreasePercent"`
 	MinChangePercent   float64 `yaml:"minChangePercent" json:"minChangePercent"`
+}
+
+type PolicySpec struct {
+	MaxProposalsPerHour int `yaml:"maxProposalsPerHour" json:"maxProposalsPerHour"`
+	MaxProposalsPerDay  int `yaml:"maxProposalsPerDay" json:"maxProposalsPerDay"`
 }
 
 type MetricProfile struct {
@@ -141,6 +147,12 @@ func (p *ApplicationProfile) Validate() error {
 		}
 		if workload.Bounds.Memory.MinChangePercent < 0 {
 			return fmt.Errorf("workload %s bounds.memory.minChangePercent must be non-negative", workload.Name)
+		}
+		if workload.Policy.MaxProposalsPerHour < 0 {
+			return fmt.Errorf("workload %s policy.maxProposalsPerHour must be non-negative", workload.Name)
+		}
+		if workload.Policy.MaxProposalsPerDay < 0 {
+			return fmt.Errorf("workload %s policy.maxProposalsPerDay must be non-negative", workload.Name)
 		}
 	}
 	for _, signal := range p.Spec.SharedSignals {

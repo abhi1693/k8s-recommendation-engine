@@ -419,6 +419,27 @@ func TestOutcomeSafetyGateBlocksTooConservativePriorRecommendation(t *testing.T)
 	}
 }
 
+func TestRecentOutcomeCooldownBlocksAfterNoActionObservation(t *testing.T) {
+	stability := &analyzer.RecommendationStability{
+		Actionable: true,
+		Replicas:   analyzer.StabilityGate{Status: "hold"},
+		CPU:        analyzer.StabilityGate{Status: "stable", Observed: 3, Required: 3},
+		Memory:     analyzer.StabilityGate{Status: "hold"},
+	}
+
+	applyRecentOutcomeCooldownGate(stability, []priorRun{
+		{OutcomeStatus: "no_action_taken"},
+		{OutcomeStatus: "too_conservative"},
+	}, "propose")
+
+	if stability.Actionable {
+		t.Fatal("recent too conservative outcome should keep recommendation under observation")
+	}
+	if stability.CPU.Status != "blocked" || !strings.Contains(stability.CPU.Reason, "observation cooldown 2/3") {
+		t.Fatalf("CPU gate = %#v, want observation cooldown block", stability.CPU)
+	}
+}
+
 func TestOutcomeSafetyGateAllowsSuccessfulPriorRecommendation(t *testing.T) {
 	stability := &analyzer.RecommendationStability{
 		Actionable: true,

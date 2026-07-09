@@ -85,7 +85,7 @@ func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) er
 		workload.Recommendation.Learning.Persistent = summary
 		stabilizeRecommendation(workload, summary)
 		applyForecastAccuracyFeedback(workload, summary.ForecastAccuracy)
-		recentRuns, err := s.recentRuns(ctx, report.Application, workload.Namespace, workload.Name, 2)
+		recentRuns, err := s.recentRuns(ctx, report.Application, workload.Namespace, workload.Name, postApplyObservationCooldownRuns)
 		if err != nil {
 			return err
 		}
@@ -98,6 +98,7 @@ func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) er
 		}
 		workload.Recommendation.Stability = evaluateStability(workload, recentRuns)
 		applyOutcomeSafetyGate(workload.Recommendation.Stability, summary.LastOutcome, workload.Recommendation.Mode)
+		applyRecentOutcomeCooldownGate(workload.Recommendation.Stability, recentRuns, workload.Recommendation.Mode)
 		if err := s.recordWorkload(ctx, report.Application, report.GeneratedAt, workload, currentForecastScores); err != nil {
 			return err
 		}
@@ -125,6 +126,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			blocked INTEGER NOT NULL,
 			recommendation_mode TEXT NOT NULL DEFAULT '',
 			recommendation_actionable INTEGER NOT NULL DEFAULT 0,
+			outcome_status TEXT NOT NULL DEFAULT '',
 			replicas_actionable INTEGER NOT NULL DEFAULT 0,
 			cpu_actionable INTEGER NOT NULL DEFAULT 0,
 			memory_actionable INTEGER NOT NULL DEFAULT 0,
@@ -205,6 +207,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "workload_runs", "recommendation_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "workload_runs", "outcome_status", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "workload_runs", "replicas_actionable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -339,6 +344,7 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 				confidence,
 				recommendation_mode,
 				recommendation_actionable,
+				outcome_status,
 				replicas_actionable,
 				cpu_actionable,
 				memory_actionable,
@@ -362,6 +368,7 @@ func (s *Store) summary(ctx context.Context, application string, workload *analy
 		&previous.Confidence,
 		&previous.Mode,
 		&previous.Actionable,
+		&previous.OutcomeStatus,
 		&previous.ReplicasActionable,
 		&previous.CPUActionable,
 		&previous.MemoryActionable,
@@ -399,6 +406,7 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 				confidence,
 				recommendation_mode,
 				recommendation_actionable,
+				outcome_status,
 				replicas_actionable,
 				cpu_actionable,
 				memory_actionable,
@@ -428,6 +436,7 @@ func (s *Store) recentRuns(ctx context.Context, application, namespace, workload
 			&run.Confidence,
 			&run.Mode,
 			&run.Actionable,
+			&run.OutcomeStatus,
 			&run.ReplicasActionable,
 			&run.CPUActionable,
 			&run.MemoryActionable,
@@ -451,6 +460,7 @@ type priorRun struct {
 	GeneratedAt              *time.Time
 	Mode                     string
 	Actionable               bool
+	OutcomeStatus            string
 	ReplicasActionable       bool
 	CPUActionable            bool
 	MemoryActionable         bool
@@ -1099,6 +1109,35 @@ func applyOutcomeSafetyGate(stability *analyzer.RecommendationStability, outcome
 	stability.Actionable = false
 }
 
+const postApplyObservationCooldownRuns = 3
+
+func applyRecentOutcomeCooldownGate(stability *analyzer.RecommendationStability, recent []priorRun, currentMode string) {
+	if stability == nil {
+		return
+	}
+	for index, run := range recent {
+		if run.OutcomeStatus == "" {
+			continue
+		}
+		if run.OutcomeStatus == "dry_run_not_applied" && currentMode != "dry-run" {
+			continue
+		}
+		reason := outcomeBlockReason(run.OutcomeStatus)
+		if reason == "" {
+			continue
+		}
+		block := analyzer.StabilityGate{
+			Status: "blocked",
+			Reason: fmt.Sprintf("%s; observation cooldown %d/%d", reason, index+1, postApplyObservationCooldownRuns),
+		}
+		stability.Replicas = block
+		stability.CPU = block
+		stability.Memory = block
+		stability.Actionable = false
+		return
+	}
+}
+
 func outcomeBlockReason(status string) string {
 	switch status {
 	case "dry_run_not_applied":
@@ -1252,11 +1291,12 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 				blocked,
 				recommendation_mode,
 				recommendation_actionable,
+				outcome_status,
 				replicas_actionable,
 				cpu_actionable,
 				memory_actionable,
 				reason_codes_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		application,
 		workload.Namespace,
@@ -1273,6 +1313,7 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 		boolInt(workload.Recommendation.Blocked),
 		workload.Recommendation.Mode,
 		boolInt(recommendationActionable(workload.Recommendation)),
+		recommendationOutcomeStatus(workload.Recommendation),
 		boolInt(replicasActionable(workload.Recommendation)),
 		boolInt(cpuActionable(workload.Recommendation)),
 		boolInt(memoryActionable(workload.Recommendation)),
@@ -1375,6 +1416,13 @@ func boolInt(value bool) int {
 
 func recommendationActionable(recommendation analyzer.Recommendation) bool {
 	return recommendation.Stability != nil && recommendation.Stability.Actionable
+}
+
+func recommendationOutcomeStatus(recommendation analyzer.Recommendation) string {
+	if recommendation.Learning.Persistent == nil || recommendation.Learning.Persistent.LastOutcome == nil {
+		return ""
+	}
+	return recommendation.Learning.Persistent.LastOutcome.Status
 }
 
 func replicasActionable(recommendation analyzer.Recommendation) bool {

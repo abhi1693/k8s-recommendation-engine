@@ -101,6 +101,7 @@ func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) er
 		workload.Recommendation.Stability = evaluateStability(workload, recentRuns)
 		applyOutcomeSafetyGate(workload.Recommendation.Stability, summary.LastOutcome, workload.Recommendation.Mode)
 		applyRecentOutcomeCooldownGate(workload.Recommendation.Stability, recentRuns, workload.Recommendation.Mode)
+		applyAvailabilityRecoveryStabilityGate(workload)
 		if err := s.recordWorkload(ctx, report.Application, report.GeneratedAt, workload, currentForecastScores); err != nil {
 			return err
 		}
@@ -234,6 +235,21 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_proposal_batch_items_lookup
 			ON proposal_batch_items(application, namespace, workload_name, first_seen_at);`,
+		`CREATE TABLE IF NOT EXISTS availability_recovery_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			application TEXT NOT NULL,
+			namespace TEXT NOT NULL,
+			workload_name TEXT NOT NULL,
+			deployment TEXT NOT NULL,
+			pod_name TEXT NOT NULL,
+			pod_uid TEXT NOT NULL,
+			attempted_at TEXT NOT NULL,
+			action TEXT NOT NULL,
+			status TEXT NOT NULL,
+			message TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_availability_recovery_events_lookup
+			ON availability_recovery_events(application, namespace, workload_name, attempted_at);`,
 		`CREATE TABLE IF NOT EXISTS seasonal_signal_observations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			application TEXT NOT NULL,
@@ -1167,6 +1183,24 @@ func evaluateStability(workload *analyzer.WorkloadReport, recent []priorRun) *an
 	}
 	stability.Actionable = gateActionable(stability.Replicas) && gateActionable(stability.CPU) && gateActionable(stability.Memory)
 	return stability
+}
+
+func applyAvailabilityRecoveryStabilityGate(workload *analyzer.WorkloadReport) {
+	if workload == nil || !workload.Recommendation.AvailabilityRecovery || workload.Recommendation.Stability == nil {
+		return
+	}
+	recommendation := workload.Recommendation
+	stability := workload.Recommendation.Stability
+	if recommendation.RecommendedReplicas > recommendation.CurrentReplicas {
+		stability.Replicas = analyzer.StabilityGate{Status: "stable", Observed: 1, Required: 1, Reason: "replica increase restores unavailable workload capacity"}
+	}
+	if direction, ok := resourceDirection(recommendation.CurrentCPURequest, recommendation.RecommendedCPURequest); ok && direction > 0 {
+		stability.CPU = analyzer.StabilityGate{Status: "stable", Observed: 1, Required: 1, Reason: "cpu increase supports availability recovery"}
+	}
+	if direction, ok := resourceDirection(recommendation.CurrentMemoryRequest, recommendation.RecommendedMemoryRequest); ok && direction > 0 {
+		stability.Memory = analyzer.StabilityGate{Status: "stable", Observed: 1, Required: 1, Reason: "memory increase supports availability recovery"}
+	}
+	stability.Actionable = gateActionable(stability.Replicas) && gateActionable(stability.CPU) && gateActionable(stability.Memory)
 }
 
 func applyOutcomeSafetyGate(stability *analyzer.RecommendationStability, outcome *analyzer.RecommendationOutcome, currentMode string) {

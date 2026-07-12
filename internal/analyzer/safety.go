@@ -22,7 +22,7 @@ func AttachSafetyAssessmentsWithPolicy(report *Report, profile *config.Applicati
 	if report == nil {
 		return
 	}
-	policies := workloadSafetyPolicies(profile)
+	policies := workloadPoliciesForSafety(profile)
 	for index := range report.Workloads {
 		workload := &report.Workloads[index]
 		workload.Recommendation.Safety = classifyRecommendationSafety(*workload, report.SharedSignals)
@@ -80,23 +80,23 @@ func classifyRecommendationSafety(workload WorkloadReport, sharedSignals []Signa
 	}
 }
 
-func workloadSafetyPolicies(profile *config.ApplicationProfile) map[string]config.SafetyPolicySpec {
-	policies := map[string]config.SafetyPolicySpec{}
+func workloadPoliciesForSafety(profile *config.ApplicationProfile) map[string]config.PolicySpec {
+	policies := map[string]config.PolicySpec{}
 	if profile == nil {
 		return policies
 	}
 	for _, workload := range profile.Spec.Workloads {
-		policies[workload.Name] = workload.Policy.Safety
+		policies[workload.Name] = workload.Policy
 	}
 	return policies
 }
 
-func applySafetyPolicy(workload *WorkloadReport, policy config.SafetyPolicySpec) {
+func applySafetyPolicy(workload *WorkloadReport, policy config.PolicySpec) {
 	if workload == nil {
 		return
 	}
 	safety := &workload.Recommendation.Safety
-	allowed := policy.AllowAutoCommit
+	allowed := policy.Safety.AllowAutoCommit
 	if len(allowed) == 0 {
 		allowed = []string{SafetyLowRisk, SafetyMediumRisk}
 	}
@@ -105,13 +105,20 @@ func applySafetyPolicy(workload *WorkloadReport, policy config.SafetyPolicySpec)
 		safety.Reasons = appendSafetyReason(safety.Reasons, fmt.Sprintf("policy allowAutoCommit excludes %s", safety.Classification))
 	}
 
-	maxDecreaseRisk := policy.MaxDecreaseRisk
+	maxDecreaseRisk := policy.Safety.MaxDecreaseRisk
 	if maxDecreaseRisk == "" {
 		maxDecreaseRisk = SafetyHighRisk
 	}
 	if factor, ok := safetyFactorByName(safety.Factors, "resource_decrease_size"); ok && riskRank(factor.Classification) > riskRank(maxDecreaseRisk) {
 		safety.AutoCommitAllowed = false
 		safety.Reasons = appendSafetyReason(safety.Reasons, fmt.Sprintf("resource decrease risk %s exceeds policy maxDecreaseRisk %s", factor.Classification, maxDecreaseRisk))
+	}
+	if policy.AvailabilityRecovery.Enabled && availabilityRecoveryChange(workload.Recommendation) {
+		safety.AutoCommitAllowed = true
+		safety.Reasons = appendSafetyReason(safety.Reasons, "availability recovery increase is allowed during an outage")
+		if !stringSliceContains(workload.Recommendation.ReasonCodes, "availability_recovery_safety_bypass") {
+			workload.Recommendation.ReasonCodes = append(workload.Recommendation.ReasonCodes, "availability_recovery_safety_bypass")
+		}
 	}
 }
 
@@ -236,14 +243,14 @@ func forecastAccuracySafety(persistent *PersistentLearning) SafetyFactor {
 }
 
 func workloadHealthSafety(workload WorkloadReport) SafetyFactor {
+	if workload.Replicas > 0 && workload.ReadyReplicas == 0 {
+		return SafetyFactor{Name: "workload_health", Classification: SafetyHighRisk, Reason: "no ready replicas"}
+	}
 	switch workload.MetricsCondition {
 	case "unhealthy":
 		return SafetyFactor{Name: "workload_health", Classification: SafetyHighRisk, Reason: "metrics condition is unhealthy"}
 	case "degraded":
 		return SafetyFactor{Name: "workload_health", Classification: SafetyMediumRisk, Reason: "metrics condition is degraded"}
-	}
-	if workload.Replicas > 0 && workload.ReadyReplicas == 0 {
-		return SafetyFactor{Name: "workload_health", Classification: SafetyHighRisk, Reason: "no ready replicas"}
 	}
 	if workload.ReadyReplicas < workload.Replicas {
 		return SafetyFactor{Name: "workload_health", Classification: SafetyMediumRisk, Reason: fmt.Sprintf("ready replicas %d/%d", workload.ReadyReplicas, workload.Replicas)}

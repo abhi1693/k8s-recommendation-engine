@@ -437,6 +437,79 @@ spec:
 	}
 }
 
+func TestAttachPatchPlansAllowsRestorativeAvailabilityRecoveryDuringUnsettledRollout(t *testing.T) {
+	worktree := t.TempDir()
+	basePath := "shipyard"
+	sourceDir := filepath.Join(worktree, basePath)
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "deployment.yaml"), []byte(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipyardhq
+  namespace: shipyardhq
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: web
+          resources:
+            requests:
+              memory: 3110Mi
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := &config.ApplicationProfile{Spec: config.ApplicationSpec{
+		Namespace: "shipyardhq",
+		Git:       config.GitSpec{BasePath: basePath},
+		Workloads: []config.WorkloadSpec{
+			{
+				Name:       "web",
+				SourceFile: "deployment.yaml",
+				TargetRef:  config.TargetRef{Kind: "Deployment", Name: "shipyardhq"},
+				Scaling:    config.ScalingSpec{Replicas: true, Memory: true},
+				Policy: config.PolicySpec{
+					AvailabilityRecovery: config.AvailabilityRecoveryPolicySpec{Enabled: true},
+				},
+			},
+		},
+	}}
+	report := &Report{Workloads: []WorkloadReport{
+		{
+			Name:       "web",
+			Containers: []ContainerReport{{Name: "web"}},
+			Rollout: RolloutReport{
+				Evaluated: true,
+				Settled:   false,
+				Reasons:   []string{"ready_replicas_pending:0/3"},
+			},
+			Recommendation: Recommendation{
+				AvailabilityRecovery:     true,
+				CurrentReplicas:          3,
+				RecommendedReplicas:      4,
+				CurrentMemoryRequest:     "3110Mi",
+				RecommendedMemoryRequest: "4Gi",
+				Stability: &RecommendationStability{
+					Replicas: StabilityGate{Status: "blocked"},
+					Memory:   StabilityGate{Status: "blocked"},
+				},
+			},
+		},
+	}}
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || plan.Blocked || !plan.Needed {
+		t.Fatalf("PatchPlan = %#v, want applyable availability recovery", plan)
+	}
+	if len(plan.Changes) != 2 {
+		t.Fatalf("Changes = %#v, want replica and memory increases", plan.Changes)
+	}
+}
+
 func TestAttachPatchPlansBlocksMissingStability(t *testing.T) {
 	worktree := t.TempDir()
 	basePath := "shipyard"

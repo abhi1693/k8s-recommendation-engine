@@ -51,6 +51,53 @@ func TestAttachSafetyAssessmentsBlocksHighRiskMemoryDecrease(t *testing.T) {
 	}
 }
 
+func TestAvailabilityRecoveryIncreaseBypassesHighRiskSafetyBlock(t *testing.T) {
+	report := &Report{
+		Workloads: []WorkloadReport{
+			{
+				Name:             "web",
+				Replicas:         3,
+				ReadyReplicas:    0,
+				MetricsCondition: "degraded",
+				Rollout:          RolloutReport{Evaluated: true, Settled: false, Reasons: []string{"ready_replicas_pending:0/3"}},
+				Recommendation: Recommendation{
+					AvailabilityRecovery:     true,
+					CurrentReplicas:          3,
+					RecommendedReplicas:      4,
+					CurrentMemoryRequest:     "3110Mi",
+					RecommendedMemoryRequest: "4Gi",
+					Learning:                 LearningEvidence{Persistent: &PersistentLearning{}},
+				},
+			},
+		},
+	}
+	profile := &config.ApplicationProfile{Spec: config.ApplicationSpec{Workloads: []config.WorkloadSpec{
+		{
+			Name: "web",
+			Policy: config.PolicySpec{
+				AvailabilityRecovery: config.AvailabilityRecoveryPolicySpec{Enabled: true},
+				Safety:               config.SafetyPolicySpec{AllowAutoCommit: []string{SafetyLowRisk, SafetyMediumRisk}},
+			},
+		},
+	}}}
+
+	AttachSafetyAssessmentsWithPolicy(report, profile)
+	recommendation := report.Workloads[0].Recommendation
+	if recommendation.Safety.Classification != SafetyHighRisk {
+		t.Fatalf("Safety.Classification = %q, want high_risk", recommendation.Safety.Classification)
+	}
+	if !recommendation.Safety.AutoCommitAllowed {
+		t.Fatalf("AutoCommitAllowed = false, reasons=%v", recommendation.Safety.Reasons)
+	}
+	if recommendation.Blocked {
+		t.Fatalf("Blocked = true, reasons=%v", recommendation.BlockReasons)
+	}
+	factor, ok := safetyFactorByName(recommendation.Safety.Factors, "workload_health")
+	if !ok || factor.Reason != "no ready replicas" {
+		t.Fatalf("workload health factor = %#v, want no ready replicas", factor)
+	}
+}
+
 func TestMediumRiskSafetyDoesNotBlockPatchPlan(t *testing.T) {
 	worktree := t.TempDir()
 	basePath := "shipyard"

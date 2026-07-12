@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -95,6 +96,25 @@ func (c *Client) ListServices(ctx context.Context, namespace string) (*corev1.Se
 
 func (c *Client) ListPods(ctx context.Context, namespace, selector string) (*corev1.PodList, error) {
 	return c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+}
+
+func (c *Client) GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	return c.clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *Client) DeletePod(ctx context.Context, namespace, name, uid, resourceVersion string) error {
+	options := metav1.DeleteOptions{}
+	if uid != "" || resourceVersion != "" {
+		options.Preconditions = &metav1.Preconditions{}
+	}
+	if uid != "" {
+		podUID := types.UID(uid)
+		options.Preconditions.UID = &podUID
+	}
+	if resourceVersion != "" {
+		options.Preconditions.ResourceVersion = &resourceVersion
+	}
+	return c.clientset.CoreV1().Pods(namespace).Delete(ctx, name, options)
 }
 
 func (c *Client) PodResizeCapability() PodResizeCapability {

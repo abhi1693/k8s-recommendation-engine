@@ -19,6 +19,7 @@ import (
 	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/kube"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/prom"
+	"github.com/abhi1693/k8s-recommendation-engine/internal/recovery"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/state"
 )
 
@@ -319,6 +320,7 @@ type commandOptions struct {
 	proposalPush           bool
 	proposalBatchWindow    time.Duration
 	allowDefaultBranchPush bool
+	availabilityRecovery   bool
 }
 
 func runAnalyze(args []string) error {
@@ -481,6 +483,7 @@ func addCommonFlags(fs *flag.FlagSet) *commandOptions {
 	fs.BoolVar(&options.proposalPush, "proposal-push", false, "push proposal commit to the configured remote")
 	fs.DurationVar(&options.proposalBatchWindow, "proposal-batch-window", 15*time.Minute, "stable recommendation batch window before creating proposal commits; set 0 to commit immediately")
 	fs.BoolVar(&options.allowDefaultBranchPush, "allow-default-branch-push", false, "allow --proposal-push when the proposal branch is the configured default branch")
+	fs.BoolVar(&options.availabilityRecovery, "availability-recovery", false, "allow policy-enabled failed workload pods to be recreated directly")
 	return options
 }
 
@@ -508,6 +511,12 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 		return err
 	}
 	analyzer.AttachSafetyAssessmentsWithPolicy(report, profile)
+	if err := recovery.Apply(ctx, kubeClient, profile, report, recovery.Options{
+		Enabled: options.availabilityRecovery,
+		StateDB: options.stateDB,
+	}); err != nil {
+		return err
+	}
 	analyzer.AttachPatchPlans(options.gitWorktree, profile, report)
 	if err := state.ApplyProposalBudgets(ctx, options.stateDB, report, profile); err != nil {
 		return err

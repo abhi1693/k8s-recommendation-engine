@@ -2,7 +2,7 @@
 
 Shipyard-first Kubernetes/K3s recommendation engine for predictive scaling through GitOps.
 
-The current implementation is Phase 1 plus dry-run GitOps patch planning: it validates Shipyard workload ownership, autoscaler blockers, Prometheus metric availability, historical recommendation inputs, anomaly state, and the Fleet source fields that would be patched. It does not patch Kubernetes and does not write to Git.
+The default analysis path is read-only. Proposal mode can write gated changes through GitOps, and the separately gated availability-recovery mode can recreate a failed Pod directly; it never patches live workload resources.
 
 ## Analyze Shipyard
 
@@ -145,6 +145,11 @@ Proposal frequency can also be limited per workload. Unset or `0` means unlimite
 policy:
   maxProposalsPerHour: 1
   maxProposalsPerDay: 4
+  availabilityRecovery:
+    enabled: true
+    failureGracePeriod: 2m
+    cooldown: 5m
+    maxAttemptsPerHour: 6
   safety:
     allowAutoCommit: [low_risk, medium_risk]
     maxDecreaseRisk: medium_risk
@@ -189,11 +194,27 @@ Safety considers resource decrease size, prior forecast accuracy, workload healt
 
 Confidence also decays automatically when Prometheus data quality weakens. Sparse range history, stale samples, noisy history, missing current samples, and query errors reduce the final confidence score. A recommendation with an actual resource or replica change is blocked when the adjusted confidence is below `policy.confidence.minAutoCommit`; the default is `0.75`.
 
+## Availability Recovery
+
+When a Deployment has fewer ready replicas than desired and one of its selected Pods has a non-zero terminated container or a current `CrashLoopBackOff`, the engine marks an availability emergency. It can use retained pre-crash memory history, recommend a bounded memory-request increase, and raise the replica floor by one up to the configured maximum. Emergency Git proposals bypass confidence, safety, rollout, stability, budget, and batch delays only when the workload opts in and every proposed change is an increase.
+
+Direct Pod recreation requires both `policy.availabilityRecovery.enabled: true` and the `--availability-recovery` command flag. It also requires `--state-db` and namespace-scoped `delete` permission on Pods.
+
+```bash
+go run ./cmd/k8s-recommendation-engine run \
+  --config configs/shipyard-profile.yaml \
+  --prometheus-url http://127.0.0.1:9090 \
+  --state-db .state/k8s-recommendation-engine.db \
+  --availability-recovery
+```
+
+The controller rechecks the Pod immediately before acting, waits for `failureGracePeriod`, and deletes at most one failed Pod per workload per reconcile with UID and resource-version preconditions. `cooldown` and `maxAttemptsPerHour` are persisted in SQLite. Kubernetes recreates the deleted Pod through its owning controller; CPU, memory, and replica changes still flow through GitOps.
+
 Reports also convert recommendations into waste/savings units. CPU is shown as core-hours, memory as GiB-hours, and replicas as replica-hours. Hourly reduction is projected over `730h` for the monthly estimate. Positive values mean reduced requested capacity; negative values mean the recommendation intentionally adds capacity.
 
 ## Run Continuously Without Git Changes
 
-Use `run` for controller-like continuous reconciliation in dry-run mode. This reads Kubernetes and Prometheus, records learning state when `--state-db` is set, and prints recommendations every interval. It does not patch Kubernetes and does not write to Git.
+Use `run` for controller-like continuous reconciliation in dry-run mode. This reads Kubernetes and Prometheus, records learning state when `--state-db` is set, and prints recommendations every interval. Without `--availability-recovery`, it does not patch Kubernetes or write to Git.
 
 ```bash
 go run ./cmd/k8s-recommendation-engine run \

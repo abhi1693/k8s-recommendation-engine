@@ -507,6 +507,11 @@ func writeCompactDecisionSummary(w io.Writer, report *Report) error {
 		if _, err := fmt.Fprintf(w, "  status:   metrics=%s blocked=%t outcome=%s\n", workload.MetricsCondition, rec.Blocked, lastOutcome(rec)); err != nil {
 			return err
 		}
+		if workload.Recovery != nil {
+			if _, err := fmt.Fprintf(w, "  recovery: enabled=%t attempted=%t succeeded=%t action=%s pod=%s reason=%s error=%s\n", workload.Recovery.Enabled, workload.Recovery.Attempted, workload.Recovery.Succeeded, emptyDash(workload.Recovery.Action), emptyDash(workload.Recovery.Pod), emptyDash(workload.Recovery.Reason), emptyDash(workload.Recovery.Error)); err != nil {
+				return err
+			}
+		}
 		if _, err := fmt.Fprintf(w, "  decision: %s confidence=%.2f safety=%s actionable=%s\n", primaryDecision(rec), rec.Confidence, safetySummary(rec), actionableSummary(rec)); err != nil {
 			return err
 		}
@@ -573,6 +578,11 @@ func writePrettyWorkload(w io.Writer, workload WorkloadReport) error {
 	}
 	if _, err := fmt.Fprintf(w, "  Status: replicas=%d ready=%d metrics=%s fleet=%t helm=%s\n", workload.Replicas, workload.ReadyReplicas, workload.MetricsCondition, workload.FleetManaged, emptyDash(workload.HelmRelease)); err != nil {
 		return err
+	}
+	if workload.Recovery != nil {
+		if _, err := fmt.Fprintf(w, "  Recovery: enabled=%t attempted=%t succeeded=%t action=%s pod=%s reason=%s error=%s\n", workload.Recovery.Enabled, workload.Recovery.Attempted, workload.Recovery.Succeeded, emptyDash(workload.Recovery.Action), emptyDash(workload.Recovery.Pod), emptyDash(workload.Recovery.Reason), emptyDash(workload.Recovery.Error)); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintf(w, "  Scaling: replicas=%t cpu=%t memory=%t commitBlocked=%t\n", workload.Scaling.Replicas, workload.Scaling.CPU, workload.Scaling.Memory, workload.CommitBlocked); err != nil {
 		return err

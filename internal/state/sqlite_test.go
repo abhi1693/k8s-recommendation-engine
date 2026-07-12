@@ -586,6 +586,27 @@ func TestProposalBudgetIsUnlimitedWhenUnset(t *testing.T) {
 	}
 }
 
+func TestAvailabilityRecoveryBypassesProposalBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	if err := RecordProposalEvents(context.Background(), path, first); err != nil {
+		t.Fatal(err)
+	}
+
+	next := availabilityRecoveryProposalReport(time.Date(2026, 7, 9, 18, 30, 0, 0, time.UTC))
+	profile := availabilityRecoveryProfile(1)
+	if err := ApplyProposalBudgets(context.Background(), path, next, profile); err != nil {
+		t.Fatal(err)
+	}
+	plan := next.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || plan.Blocked || !plan.Needed {
+		t.Fatalf("PatchPlan = %#v, want availability recovery budget bypass", plan)
+	}
+	if !contains(plan.BlockReasons, "proposal budget bypassed for availability recovery") {
+		t.Fatalf("missing availability recovery budget bypass reason: %#v", plan.BlockReasons)
+	}
+}
+
 func TestRecordProposalEventsPersistsPushFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	report := testProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
@@ -806,6 +827,23 @@ func TestProposalBatchBypassesWindowForUrgentTrafficScaleUp(t *testing.T) {
 	}
 	if !contains(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly") {
 		t.Fatalf("missing urgent bypass reason: %#v", plan.BlockReasons)
+	}
+}
+
+func TestAvailabilityRecoveryBypassesProposalBatchWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	report := availabilityRecoveryProposalReport(time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC))
+	profile := availabilityRecoveryProfile(0)
+
+	if err := ApplyProposalBatch(context.Background(), path, report, profile, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || plan.Blocked || !plan.Needed {
+		t.Fatalf("PatchPlan = %#v, want availability recovery batch bypass", plan)
+	}
+	if !contains(plan.BlockReasons, "proposal batch bypassed for availability recovery") {
+		t.Fatalf("missing availability recovery batch bypass reason: %#v", plan.BlockReasons)
 	}
 }
 
@@ -1075,4 +1113,34 @@ func testProposalReport(generatedAt time.Time) *analyzer.Report {
 		Commit: "abc123",
 	}
 	return report
+}
+
+func availabilityRecoveryProposalReport(generatedAt time.Time) *analyzer.Report {
+	report := testProposalReport(generatedAt)
+	report.Proposal = nil
+	workload := &report.Workloads[0]
+	workload.Recommendation.AvailabilityRecovery = true
+	workload.Recommendation.CurrentReplicas = 3
+	workload.Recommendation.RecommendedReplicas = 4
+	workload.Recommendation.RecommendedCPURequest = workload.Recommendation.CurrentCPURequest
+	workload.Recommendation.PatchPlan.Changes = []analyzer.PatchChange{
+		{Field: "spec.replicas", Operation: "replace", Current: "3", Recommended: "4"},
+	}
+	return report
+}
+
+func availabilityRecoveryProfile(maxProposalsPerHour int) *config.ApplicationProfile {
+	return &config.ApplicationProfile{
+		Spec: config.ApplicationSpec{Workloads: []config.WorkloadSpec{
+			{
+				Name: "web",
+				Policy: config.PolicySpec{
+					MaxProposalsPerHour: maxProposalsPerHour,
+					AvailabilityRecovery: config.AvailabilityRecoveryPolicySpec{
+						Enabled: true,
+					},
+				},
+			},
+		}},
+	}
 }

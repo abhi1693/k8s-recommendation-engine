@@ -310,6 +310,10 @@ func (s *Store) ApplyProposalBudgets(ctx context.Context, report *analyzer.Repor
 		if !ok {
 			continue
 		}
+		if spec.Policy.AvailabilityRecovery.Enabled && availabilityRecoveryPlan(workload, plan) {
+			plan.BlockReasons = append(plan.BlockReasons, "proposal budget bypassed for availability recovery")
+			continue
+		}
 		reasons, err := s.proposalBudgetBlockReasons(ctx, report.Application, workload.Namespace, workload.Name, report.GeneratedAt, spec.Policy)
 		if err != nil {
 			return err
@@ -338,6 +342,10 @@ func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report,
 		plan := workload.Recommendation.PatchPlan
 		if proposalEventPlan(plan) {
 			policy := policies[workload.Name]
+			if policy.AvailabilityRecovery.Enabled && availabilityRecoveryPlan(workload, plan) {
+				plan.BlockReasons = append(plan.BlockReasons, "proposal batch bypassed for availability recovery")
+				continue
+			}
 			if urgentBatchBypassAllowed(policy) && urgentBatchBypass(report.SharedSignals, workload, plan) {
 				plan.BlockReasons = append(plan.BlockReasons, "proposal batch bypassed for urgent traffic anomaly")
 				continue
@@ -649,6 +657,27 @@ func urgentBatchBypass(sharedSignals []analyzer.SignalReport, workload *analyzer
 		}
 	}
 	return false
+}
+
+func availabilityRecoveryPlan(workload *analyzer.WorkloadReport, plan *analyzer.PatchPlan) bool {
+	if workload == nil || plan == nil || !workload.Recommendation.AvailabilityRecovery || len(plan.Changes) == 0 {
+		return false
+	}
+	for _, change := range plan.Changes {
+		switch {
+		case change.Field == "spec.replicas":
+			if !numericIncrease(change.Current, change.Recommended) {
+				return false
+			}
+		case strings.HasSuffix(change.Field, ".resources.requests.cpu"), strings.HasSuffix(change.Field, ".resources.requests.memory"):
+			if !quantityIncrease(change.Current, change.Recommended) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func numericIncrease(current, recommended string) bool {

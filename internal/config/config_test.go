@@ -46,6 +46,41 @@ func TestValidateRejectsInvalidMinAutoCommitConfidence(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidAvailabilityRecoveryPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*AvailabilityRecoveryPolicySpec)
+	}{
+		{
+			name: "failure grace period",
+			mutate: func(policy *AvailabilityRecoveryPolicySpec) {
+				policy.FailureGracePeriod = "later"
+			},
+		},
+		{
+			name: "cooldown",
+			mutate: func(policy *AvailabilityRecoveryPolicySpec) {
+				policy.Cooldown = "-1m"
+			},
+		},
+		{
+			name: "attempt limit",
+			mutate: func(policy *AvailabilityRecoveryPolicySpec) {
+				policy.MaxAttemptsPerHour = -1
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := validTestProfile()
+			test.mutate(&profile.Spec.Workloads[0].Policy.AvailabilityRecovery)
+			if err := profile.Validate(); err == nil {
+				t.Fatal("Validate() expected availability recovery policy error")
+			}
+		})
+	}
+}
+
 func validTestProfile() *ApplicationProfile {
 	return &ApplicationProfile{
 		Metadata: Metadata{Name: "shipyard"},

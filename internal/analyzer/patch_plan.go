@@ -97,7 +97,8 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 		plan.BlockReasons = append(plan.BlockReasons, "stability state is unavailable; run with --state-db before planning Git changes")
 		return plan
 	}
-	if report.Rollout.Evaluated && !report.Rollout.Settled {
+	recoveryChange := workload.Policy.AvailabilityRecovery.Enabled && availabilityRecoveryChange(report.Recommendation)
+	if report.Rollout.Evaluated && !report.Rollout.Settled && !recoveryChange {
 		plan.Blocked = true
 		plan.BlockReasons = append(plan.BlockReasons, "workload rollout is not settled: "+strings.Join(report.Rollout.Reasons, ", "))
 		return plan
@@ -110,7 +111,7 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 			current = missingValue
 			operation = "add"
 		}
-		if stabilityGateAllowsPatch(report.Recommendation.Stability.Replicas, !ok) {
+		if recoveryChange || stabilityGateAllowsPatch(report.Recommendation.Stability.Replicas, !ok) {
 			recommended := strconv.FormatInt(int64(report.Recommendation.RecommendedReplicas), 10)
 			if appendPatchChange(plan, "spec.replicas", operation, current, recommended) {
 				setScalarAt(modifiedDocument, recommended, "spec", "replicas")
@@ -130,7 +131,7 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 				current = missingValue
 				operation = "add"
 			}
-			if stabilityGateAllowsPatch(report.Recommendation.Stability.CPU, !ok) {
+			if recoveryChange || stabilityGateAllowsPatch(report.Recommendation.Stability.CPU, !ok) {
 				if appendPatchChange(plan, field, operation, current, report.Recommendation.RecommendedCPURequest) {
 					setContainerRequestScalar(modifiedDocument, containerName, "cpu", report.Recommendation.RecommendedCPURequest)
 				}
@@ -146,7 +147,7 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 				current = missingValue
 				operation = "add"
 			}
-			if stabilityGateAllowsPatch(report.Recommendation.Stability.Memory, !ok) {
+			if recoveryChange || stabilityGateAllowsPatch(report.Recommendation.Stability.Memory, !ok) {
 				if appendPatchChange(plan, field, operation, current, report.Recommendation.RecommendedMemoryRequest) {
 					setContainerRequestScalar(modifiedDocument, containerName, "memory", report.Recommendation.RecommendedMemoryRequest)
 				}

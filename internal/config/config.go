@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"text/template"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -86,10 +87,11 @@ type ChangeBounds struct {
 }
 
 type PolicySpec struct {
-	MaxProposalsPerHour int                  `yaml:"maxProposalsPerHour" json:"maxProposalsPerHour"`
-	MaxProposalsPerDay  int                  `yaml:"maxProposalsPerDay" json:"maxProposalsPerDay"`
-	Safety              SafetyPolicySpec     `yaml:"safety" json:"safety"`
-	Confidence          ConfidencePolicySpec `yaml:"confidence" json:"confidence"`
+	MaxProposalsPerHour  int                            `yaml:"maxProposalsPerHour" json:"maxProposalsPerHour"`
+	MaxProposalsPerDay   int                            `yaml:"maxProposalsPerDay" json:"maxProposalsPerDay"`
+	Safety               SafetyPolicySpec               `yaml:"safety" json:"safety"`
+	Confidence           ConfidencePolicySpec           `yaml:"confidence" json:"confidence"`
+	AvailabilityRecovery AvailabilityRecoveryPolicySpec `yaml:"availabilityRecovery" json:"availabilityRecovery"`
 }
 
 type SafetyPolicySpec struct {
@@ -100,6 +102,13 @@ type SafetyPolicySpec struct {
 
 type ConfidencePolicySpec struct {
 	MinAutoCommit float64 `yaml:"minAutoCommit" json:"minAutoCommit"`
+}
+
+type AvailabilityRecoveryPolicySpec struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	FailureGracePeriod string `yaml:"failureGracePeriod" json:"failureGracePeriod,omitempty"`
+	Cooldown           string `yaml:"cooldown" json:"cooldown,omitempty"`
+	MaxAttemptsPerHour int    `yaml:"maxAttemptsPerHour" json:"maxAttemptsPerHour,omitempty"`
 }
 
 type MetricProfile struct {
@@ -176,6 +185,19 @@ func (p *ApplicationProfile) Validate() error {
 		}
 		if workload.Policy.Confidence.MinAutoCommit < 0 || workload.Policy.Confidence.MinAutoCommit > 1 {
 			return fmt.Errorf("workload %s policy.confidence.minAutoCommit must be between 0 and 1", workload.Name)
+		}
+		if value := workload.Policy.AvailabilityRecovery.FailureGracePeriod; value != "" {
+			if duration, err := time.ParseDuration(value); err != nil || duration < 0 {
+				return fmt.Errorf("workload %s policy.availabilityRecovery.failureGracePeriod must be a non-negative duration", workload.Name)
+			}
+		}
+		if value := workload.Policy.AvailabilityRecovery.Cooldown; value != "" {
+			if duration, err := time.ParseDuration(value); err != nil || duration < 0 {
+				return fmt.Errorf("workload %s policy.availabilityRecovery.cooldown must be a non-negative duration", workload.Name)
+			}
+		}
+		if workload.Policy.AvailabilityRecovery.MaxAttemptsPerHour < 0 {
+			return fmt.Errorf("workload %s policy.availabilityRecovery.maxAttemptsPerHour must be non-negative", workload.Name)
 		}
 	}
 	for _, signal := range p.Spec.SharedSignals {

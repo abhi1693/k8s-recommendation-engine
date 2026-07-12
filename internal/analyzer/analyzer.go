@@ -297,8 +297,25 @@ func (a *Analyzer) availabilityReport(ctx context.Context, namespace string, dep
 		if podReady(pod) && pod.Spec.NodeName != "" {
 			readyNodes[pod.Spec.NodeName] = struct{}{}
 		}
+		if failed, ok := failedPodReport(pod); ok {
+			report.FailedPods = append(report.FailedPods, failed)
+		}
 	}
 	report.ReadyNodes = len(readyNodes)
+	sort.Slice(report.FailedPods, func(i, j int) bool {
+		if report.FailedPods[i].FailedAt.Equal(report.FailedPods[j].FailedAt) {
+			return report.FailedPods[i].Name < report.FailedPods[j].Name
+		}
+		return report.FailedPods[i].FailedAt.Before(report.FailedPods[j].FailedAt)
+	})
+	desired := derefInt32(deployment.Spec.Replicas)
+	if desired == 0 && deployment.Spec.Replicas == nil {
+		desired = 1
+	}
+	report.Emergency = desired > 0 && report.ReadyEndpoints < desired && len(report.FailedPods) > 0
+	if report.Emergency {
+		report.Reasons = append(report.Reasons, fmt.Sprintf("failed_pods:%d", len(report.FailedPods)))
+	}
 
 	if report.Public && report.ReadyEndpoints >= 2 {
 		report.ReplicaFloor = 2
@@ -314,6 +331,35 @@ func (a *Analyzer) availabilityReport(ctx context.Context, namespace string, dep
 		}
 	}
 	return report, nil
+}
+
+func failedPodReport(pod corev1.Pod) (FailedPodReport, bool) {
+	if pod.DeletionTimestamp != nil {
+		return FailedPodReport{}, false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		terminated := status.State.Terminated
+		if terminated == nil && status.State.Waiting != nil && status.State.Waiting.Reason == "CrashLoopBackOff" {
+			terminated = status.LastTerminationState.Terminated
+		}
+		if terminated == nil || terminated.ExitCode == 0 {
+			continue
+		}
+		reason := terminated.Reason
+		if reason == "" {
+			reason = fmt.Sprintf("exit_code_%d", terminated.ExitCode)
+		}
+		return FailedPodReport{
+			Name:         pod.Name,
+			UID:          string(pod.UID),
+			Container:    status.Name,
+			Reason:       reason,
+			ExitCode:     terminated.ExitCode,
+			RestartCount: status.RestartCount,
+			FailedAt:     terminated.FinishedAt.Time,
+		}, true
+	}
+	return FailedPodReport{}, false
 }
 
 func serviceMatchesDeployment(service corev1.Service, podLabels map[string]string) bool {
@@ -531,16 +577,20 @@ func containerReport(name string, requests, limits corev1.ResourceList) Containe
 
 func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sharedSignals []SignalReport) Recommendation {
 	recommendation := Recommendation{
-		Mode:                "dry-run",
-		CurrentReplicas:     report.Replicas,
-		RecommendedReplicas: report.Replicas,
-		Confidence:          0.5,
+		Mode:                 "dry-run",
+		CurrentReplicas:      report.Replicas,
+		RecommendedReplicas:  report.Replicas,
+		Confidence:           0.5,
+		AvailabilityRecovery: report.Availability.Emergency,
 		Learning: LearningEvidence{
 			Mode:        "prometheus-history",
 			Description: "learned from Prometheus range history for this analysis window; persistent model state is not enabled yet",
 		},
 		Blocked:      report.CommitBlocked,
 		BlockReasons: append([]string(nil), report.BlockReasons...),
+	}
+	if recommendation.AvailabilityRecovery {
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, "availability_recovery_required")
 	}
 
 	if len(report.Containers) != 1 {
@@ -625,13 +675,23 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 	memoryDrivenReplicas := int32(0)
 	memoryForDecision := 0.0
 	hasMemoryDecision := false
-	if hasMemory && container.MemoryRequestBytes > 0 {
-		memoryForDecision = memoryUsage
-		if history := signalHistory(report.MetricSignals, "memory_working_set"); history != nil {
-			memoryForDecision = math.Max(memoryForDecision, history.P95)
-			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_working_set_p95_%s:%s", history.Window, formatBytes(history.P95)))
+	memoryHistory := signalHistory(report.MetricSignals, "memory_working_set")
+	if container.MemoryRequestBytes > 0 && (hasMemory || recommendation.AvailabilityRecovery && memoryHistory != nil && memoryHistory.Points > 0) {
+		if hasMemory {
+			memoryForDecision = memoryUsage
 		}
-		hasMemoryDecision = true
+		if memoryHistory != nil {
+			historyDemand := memoryHistory.P95
+			if recommendation.AvailabilityRecovery {
+				historyDemand = math.Max(historyDemand, memoryHistory.Max)
+			}
+			memoryForDecision = math.Max(memoryForDecision, historyDemand)
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_working_set_p95_%s:%s", memoryHistory.Window, formatBytes(memoryHistory.P95)))
+			if recommendation.AvailabilityRecovery && !hasMemory {
+				recommendation.ReasonCodes = append(recommendation.ReasonCodes, "memory_history_fallback_for_availability_recovery")
+			}
+		}
+		hasMemoryDecision = memoryForDecision > 0
 		memoryUtilization := memoryForDecision / (container.MemoryRequestBytes * replicas)
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_utilization:%.1f%%", memoryUtilization*100))
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, learnedPolicyReason("memory_policy_learned", memoryPolicy))
@@ -676,6 +736,18 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("pdb_replica_floor:%d", pdbFloor))
 		}
 		availabilityFloor := report.Availability.ReplicaFloor
+		if recommendation.AvailabilityRecovery {
+			recoveryFloor := report.Replicas + 1
+			if workload.Bounds.Replicas.Max > 0 && recoveryFloor > int32(workload.Bounds.Replicas.Max) {
+				recoveryFloor = int32(workload.Bounds.Replicas.Max)
+			}
+			if recoveryFloor > availabilityFloor {
+				availabilityFloor = recoveryFloor
+			}
+			if recoveryFloor > report.Replicas {
+				recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("availability_emergency_replica_floor:%d", recoveryFloor))
+			}
+		}
 		if availabilityFloor > 0 {
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("availability_replica_floor:%d", availabilityFloor))
 			if len(report.Availability.Reasons) > 0 {
@@ -698,20 +770,22 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 			recommendation.ReplicaDecision.RecommendedReplicas = rawReplicas
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_recommendation_clamped_to_max")
 		}
-		capacityCeiling := maxInt32(rawReplicas, trafficDecision.Replicas, cpuDrivenReplicas, memoryDrivenReplicas, report.Replicas)
-		if plan, ok := optimizeReplicaResourcePlan(workload, report, container, rawReplicas, capacityCeiling, cpuPolicy, memoryPolicy, hasCPUDecision, cpuForDecision, resourceDownscaleAllowed(report.MetricSignals, "cpu_usage"), hasMemoryDecision, memoryForDecision, resourceDownscaleAllowed(report.MetricSignals, "memory_working_set")); ok {
-			rawReplicas = plan.Replicas
-			if workload.Scaling.CPU && plan.CPURequest != "" {
-				recommendation.RecommendedCPURequest = plan.CPURequest
+		if !recommendation.AvailabilityRecovery {
+			capacityCeiling := maxInt32(rawReplicas, trafficDecision.Replicas, cpuDrivenReplicas, memoryDrivenReplicas, report.Replicas)
+			if plan, ok := optimizeReplicaResourcePlan(workload, report, container, rawReplicas, capacityCeiling, cpuPolicy, memoryPolicy, hasCPUDecision, cpuForDecision, resourceDownscaleAllowed(report.MetricSignals, "cpu_usage"), hasMemoryDecision, memoryForDecision, resourceDownscaleAllowed(report.MetricSignals, "memory_working_set")); ok {
+				rawReplicas = plan.Replicas
+				if workload.Scaling.CPU && plan.CPURequest != "" {
+					recommendation.RecommendedCPURequest = plan.CPURequest
+				}
+				if workload.Scaling.Memory && plan.MemoryRequest != "" {
+					recommendation.RecommendedMemoryRequest = plan.MemoryRequest
+				}
+				recommendation.ReasonCodes = append(recommendation.ReasonCodes,
+					fmt.Sprintf("replica_joint_optimizer_selected:replicas=%d,total_cpu=%.4g,total_memory=%s", plan.Replicas, plan.TotalCPUCores, formatBytes(plan.TotalMemoryBytes)),
+				)
+				replaceJointResourceReason(&recommendation, "cpu", recommendation.CurrentCPURequest, recommendation.RecommendedCPURequest)
+				replaceJointResourceReason(&recommendation, "memory", recommendation.CurrentMemoryRequest, recommendation.RecommendedMemoryRequest)
 			}
-			if workload.Scaling.Memory && plan.MemoryRequest != "" {
-				recommendation.RecommendedMemoryRequest = plan.MemoryRequest
-			}
-			recommendation.ReasonCodes = append(recommendation.ReasonCodes,
-				fmt.Sprintf("replica_joint_optimizer_selected:replicas=%d,total_cpu=%.4g,total_memory=%s", plan.Replicas, plan.TotalCPUCores, formatBytes(plan.TotalMemoryBytes)),
-			)
-			replaceJointResourceReason(&recommendation, "cpu", recommendation.CurrentCPURequest, recommendation.RecommendedCPURequest)
-			replaceJointResourceReason(&recommendation, "memory", recommendation.CurrentMemoryRequest, recommendation.RecommendedMemoryRequest)
 		}
 		if rawReplicas < report.Replicas {
 			if reason := replicaDownscaleBlockReason(report, sharedSignals); reason != "" {
@@ -1876,6 +1950,11 @@ func applyConfidenceDecay(workload config.WorkloadSpec, report WorkloadReport, s
 	assessment.Decay = roundFloat(math.Min(0.6, assessment.Decay), 3)
 	assessment.Adjusted = roundFloat(clampFloat(baseConfidence-assessment.Decay, 0, 0.95), 3)
 	assessment.AutoCommitAllowed = assessment.Adjusted >= assessment.MinAutoCommit
+	if !assessment.AutoCommitAllowed && workload.Policy.AvailabilityRecovery.Enabled && availabilityRecoveryChange(*recommendation) {
+		assessment.AutoCommitAllowed = true
+		assessment.Reasons = append(assessment.Reasons, "availability recovery increase bypasses confidence threshold")
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, "availability_recovery_confidence_bypass")
+	}
 	if assessment.AutoCommitAllowed && len(assessment.Reasons) == 0 {
 		assessment.Reasons = append(assessment.Reasons, "prometheus signal quality supports confidence")
 	}

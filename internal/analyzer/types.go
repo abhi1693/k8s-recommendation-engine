@@ -35,27 +35,28 @@ type Summary struct {
 }
 
 type WorkloadReport struct {
-	Name             string             `json:"name"`
-	Namespace        string             `json:"namespace"`
-	Kind             string             `json:"kind"`
-	Deployment       string             `json:"deployment"`
-	Replicas         int32              `json:"replicas"`
-	ReadyReplicas    int32              `json:"readyReplicas"`
-	FleetManaged     bool               `json:"fleetManaged"`
-	FleetObjectSet   string             `json:"fleetObjectSet,omitempty"`
-	HelmRelease      string             `json:"helmRelease,omitempty"`
-	Scaling          ScalingReport      `json:"scaling"`
-	Containers       []ContainerReport  `json:"containers"`
-	Autoscalers      []Autoscaler       `json:"autoscalers,omitempty"`
-	PDBs             []PDBReport        `json:"pdbs,omitempty"`
-	Availability     AvailabilityReport `json:"availability"`
-	Rollout          RolloutReport      `json:"rollout"`
-	CommitBlocked    bool               `json:"commitBlocked"`
-	BlockReasons     []string           `json:"blockReasons,omitempty"`
-	MetricProfile    string             `json:"metricProfile"`
-	MetricSignals    []SignalReport     `json:"metricSignals"`
-	MetricsCondition string             `json:"metricsCondition"`
-	Recommendation   Recommendation     `json:"recommendation"`
+	Name             string                      `json:"name"`
+	Namespace        string                      `json:"namespace"`
+	Kind             string                      `json:"kind"`
+	Deployment       string                      `json:"deployment"`
+	Replicas         int32                       `json:"replicas"`
+	ReadyReplicas    int32                       `json:"readyReplicas"`
+	FleetManaged     bool                        `json:"fleetManaged"`
+	FleetObjectSet   string                      `json:"fleetObjectSet,omitempty"`
+	HelmRelease      string                      `json:"helmRelease,omitempty"`
+	Scaling          ScalingReport               `json:"scaling"`
+	Containers       []ContainerReport           `json:"containers"`
+	Autoscalers      []Autoscaler                `json:"autoscalers,omitempty"`
+	PDBs             []PDBReport                 `json:"pdbs,omitempty"`
+	Availability     AvailabilityReport          `json:"availability"`
+	Rollout          RolloutReport               `json:"rollout"`
+	CommitBlocked    bool                        `json:"commitBlocked"`
+	BlockReasons     []string                    `json:"blockReasons,omitempty"`
+	MetricProfile    string                      `json:"metricProfile"`
+	MetricSignals    []SignalReport              `json:"metricSignals"`
+	MetricsCondition string                      `json:"metricsCondition"`
+	Recommendation   Recommendation              `json:"recommendation"`
+	Recovery         *AvailabilityRecoveryReport `json:"recovery,omitempty"`
 }
 
 type ScalingReport struct {
@@ -93,13 +94,36 @@ type PDBReport struct {
 }
 
 type AvailabilityReport struct {
-	ReplicaFloor                 int32    `json:"replicaFloor"`
-	Public                       bool     `json:"public"`
-	Services                     []string `json:"services,omitempty"`
-	ReadyEndpoints               int32    `json:"readyEndpoints"`
-	ReadyNodes                   int      `json:"readyNodes"`
-	RollingUpdateZeroUnavailable bool     `json:"rollingUpdateZeroUnavailable"`
-	Reasons                      []string `json:"reasons,omitempty"`
+	ReplicaFloor                 int32             `json:"replicaFloor"`
+	Public                       bool              `json:"public"`
+	Services                     []string          `json:"services,omitempty"`
+	ReadyEndpoints               int32             `json:"readyEndpoints"`
+	ReadyNodes                   int               `json:"readyNodes"`
+	RollingUpdateZeroUnavailable bool              `json:"rollingUpdateZeroUnavailable"`
+	Reasons                      []string          `json:"reasons,omitempty"`
+	Emergency                    bool              `json:"emergency"`
+	FailedPods                   []FailedPodReport `json:"failedPods,omitempty"`
+}
+
+type FailedPodReport struct {
+	Name         string    `json:"name"`
+	UID          string    `json:"uid"`
+	Container    string    `json:"container"`
+	Reason       string    `json:"reason"`
+	ExitCode     int32     `json:"exitCode"`
+	RestartCount int32     `json:"restartCount"`
+	FailedAt     time.Time `json:"failedAt"`
+}
+
+type AvailabilityRecoveryReport struct {
+	Enabled   bool   `json:"enabled"`
+	Emergency bool   `json:"emergency"`
+	Attempted bool   `json:"attempted"`
+	Succeeded bool   `json:"succeeded"`
+	Action    string `json:"action,omitempty"`
+	Pod       string `json:"pod,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type RolloutReport struct {
@@ -191,6 +215,7 @@ type Recommendation struct {
 	Safety                   SafetyAssessment         `json:"safety"`
 	Learning                 LearningEvidence         `json:"learning"`
 	ReplicaDecision          *ReplicaDecision         `json:"replicaDecision,omitempty"`
+	AvailabilityRecovery     bool                     `json:"availabilityRecovery"`
 	ReasonCodes              []string                 `json:"reasonCodes,omitempty"`
 	Blocked                  bool                     `json:"blocked"`
 	BlockReasons             []string                 `json:"blockReasons,omitempty"`

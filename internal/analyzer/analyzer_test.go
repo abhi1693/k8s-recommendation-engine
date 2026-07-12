@@ -9,6 +9,7 @@ import (
 	"github.com/abhi1693/k8s-recommendation-engine/internal/prom"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestMetricCondition(t *testing.T) {
@@ -757,5 +758,106 @@ func scaleDownCandidateReport() WorkloadReport {
 			sampleSignalWithHistory("cpu_usage", 0.05, SignalHistory{Points: 24, P50: 0.04, P95: 0.08, Max: 0.1}),
 			sampleSignalWithHistory("memory_working_set", 128*1024*1024, SignalHistory{Points: 24, P50: 96 * 1024 * 1024, P95: 128 * 1024 * 1024, Max: 160 * 1024 * 1024}),
 		},
+	}
+}
+
+func TestBuildRecommendationUsesHistoryForAvailabilityEmergency(t *testing.T) {
+	report := WorkloadReport{
+		Replicas:      3,
+		ReadyReplicas: 0,
+		Containers: []ContainerReport{
+			{
+				Name:               "web",
+				CPURequest:         "200m",
+				CPURequestCores:    0.2,
+				MemoryRequest:      "3110Mi",
+				MemoryRequestBytes: 3110 * 1024 * 1024,
+			},
+		},
+		Availability: AvailabilityReport{
+			Emergency:  true,
+			FailedPods: []FailedPodReport{{Name: "web-1", Reason: "Error", ExitCode: 133}},
+		},
+		MetricsCondition: "degraded",
+		MetricSignals: []SignalReport{
+			{
+				Name:     "memory_working_set",
+				Required: true,
+				Healthy:  false,
+				History: &SignalHistory{
+					Points: 72,
+					P50:    7 * 1024 * 1024 * 1024,
+					P95:    9 * 1024 * 1024 * 1024,
+					Max:    9.2 * 1024 * 1024 * 1024,
+				},
+			},
+		},
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{Replicas: true, Memory: true},
+		Bounds: config.BoundsSpec{
+			Replicas: config.ReplicaBounds{Min: 1, Max: 4},
+			Memory:   config.ChangeBounds{MinChangePercent: 5},
+		},
+		Policy: config.PolicySpec{
+			AvailabilityRecovery: config.AvailabilityRecoveryPolicySpec{Enabled: true},
+			Confidence:           config.ConfidencePolicySpec{MinAutoCommit: 0.75},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if !got.AvailabilityRecovery {
+		t.Fatal("AvailabilityRecovery = false, want true")
+	}
+	if got.RecommendedReplicas != 4 {
+		t.Fatalf("RecommendedReplicas = %d, want 4", got.RecommendedReplicas)
+	}
+	current, ok := memoryRequestBytes(got.CurrentMemoryRequest)
+	if !ok {
+		t.Fatalf("invalid current memory request %q", got.CurrentMemoryRequest)
+	}
+	recommended, ok := memoryRequestBytes(got.RecommendedMemoryRequest)
+	if !ok || recommended <= current {
+		t.Fatalf("RecommendedMemoryRequest = %q, want increase above %q", got.RecommendedMemoryRequest, got.CurrentMemoryRequest)
+	}
+	if got.Blocked {
+		t.Fatalf("Blocked = true, reasons=%v", got.BlockReasons)
+	}
+	reasons := strings.Join(got.ReasonCodes, "\n")
+	for _, want := range []string{
+		"availability_recovery_required",
+		"availability_emergency_replica_floor:4",
+		"memory_history_fallback_for_availability_recovery",
+		"availability_recovery_confidence_bypass",
+	} {
+		if !strings.Contains(reasons, want) {
+			t.Fatalf("missing reason %q in %v", want, got.ReasonCodes)
+		}
+	}
+}
+
+func TestFailedPodReportDetectsTerminatedDeploymentContainer(t *testing.T) {
+	failedAt := time.Date(2026, 7, 12, 8, 56, 16, 0, time.UTC)
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "shipyardhq-1", UID: "uid-1"},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{
+				Name:         "web",
+				RestartCount: 1,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode:   133,
+					Reason:     "Error",
+					FinishedAt: metav1.NewTime(failedAt),
+				}},
+			},
+		}},
+	}
+
+	got, ok := failedPodReport(pod)
+	if !ok {
+		t.Fatal("failedPodReport() did not detect terminated container")
+	}
+	if got.Name != pod.Name || got.Container != "web" || got.ExitCode != 133 || !got.FailedAt.Equal(failedAt) {
+		t.Fatalf("failedPodReport() = %#v", got)
 	}
 }

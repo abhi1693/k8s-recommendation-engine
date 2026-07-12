@@ -2,12 +2,15 @@ package analyzer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
 )
 
 func TestCreateProposalWritesPatchArtifact(t *testing.T) {
@@ -597,6 +600,222 @@ func TestBuildProposalMarksBlockedWhenOnlyPlansAreBlocked(t *testing.T) {
 	if len(proposal.BlockReasons) != 1 {
 		t.Fatalf("BlockReasons = %#v, want blocked plan reason", proposal.BlockReasons)
 	}
+}
+
+func TestBuildProposalMergesHelmValuesChangesForSharedFile(t *testing.T) {
+	worktree := t.TempDir()
+	writeRepoFile(t, worktree, "zitadel/values.yaml", `
+# shared chart values
+replicaCount: 2
+resources:
+  requests:
+    cpu: 150m
+    memory: 384Mi
+login:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+`)
+	report := &Report{Application: "zitadel", Workloads: []WorkloadReport{
+		{
+			Namespace: "zitadel", Deployment: "zitadel",
+			Recommendation: Recommendation{PatchPlan: &PatchPlan{
+				SourceFile: "zitadel/values.yaml", SourceFormat: patchSourceHelmValues,
+				Resource: "Deployment/zitadel/zitadel", Needed: true,
+				Changes: []PatchChange{
+					{Field: "spec.replicas", SourcePath: []string{"replicaCount"}, Operation: "replace", Current: "2", Recommended: "3"},
+					{Field: "spec.template.spec.containers[name=zitadel].resources.requests.cpu", SourcePath: []string{"resources", "requests", "cpu"}, Operation: "replace", Current: "150m", Recommended: "125m"},
+				},
+			}},
+		},
+		{
+			Namespace: "zitadel", Deployment: "zitadel-login",
+			Recommendation: Recommendation{PatchPlan: &PatchPlan{
+				SourceFile: "zitadel/values.yaml", SourceFormat: patchSourceHelmValues,
+				Resource: "Deployment/zitadel/zitadel-login", Needed: true,
+				Changes: []PatchChange{
+					{Field: "spec.replicas", SourcePath: []string{"login", "replicaCount"}, Operation: "replace", Current: "2", Recommended: "3"},
+					{Field: "spec.template.spec.containers[name=zitadel-login].resources.requests.memory", SourcePath: []string{"login", "resources", "requests", "memory"}, Operation: "replace", Current: "128Mi", Recommended: "112Mi"},
+				},
+			}},
+		},
+	}}
+
+	proposal := BuildProposal(worktree, report)
+	if proposal.Blocked || len(proposal.Files) != 1 {
+		t.Fatalf("proposal = %#v, want one applyable shared values file", proposal)
+	}
+	file := proposal.Files[0]
+	if len(file.Changes) != 4 {
+		t.Fatalf("Changes = %#v, want four merged changes", file.Changes)
+	}
+	for _, want := range []string{"# shared chart values", "replicaCount: 3", "cpu: 125m", "memory: 112Mi"} {
+		if !strings.Contains(file.ProposedContent, want) {
+			t.Fatalf("ProposedContent missing %q:\n%s", want, file.ProposedContent)
+		}
+	}
+	if strings.Count(file.ProposedContent, "replicaCount: 3") != 2 {
+		t.Fatalf("ProposedContent did not update both replica paths:\n%s", file.ProposedContent)
+	}
+}
+
+func TestHelmValuesPatchPlanningFlowsIntoSharedFileProposal(t *testing.T) {
+	worktree := t.TempDir()
+	writeRepoFile(t, worktree, "charts/zitadel/values.yaml", "replicaCount: 2\nlogin:\n  replicaCount: 2\n")
+	profile := &config.ApplicationProfile{Spec: config.ApplicationSpec{
+		Namespace: "zitadel",
+		Git:       config.GitSpec{BasePath: "charts/zitadel"},
+		Workloads: []config.WorkloadSpec{
+			{
+				Name: "server", SourceFile: "values.yaml",
+				TargetRef:  config.TargetRef{Kind: "Deployment", Name: "zitadel"},
+				HelmValues: &config.HelmValuesSpec{Paths: config.HelmValuePaths{Replicas: []string{"replicaCount"}}},
+				Scaling:    config.ScalingSpec{Replicas: true},
+			},
+			{
+				Name: "login", SourceFile: "values.yaml",
+				TargetRef:  config.TargetRef{Kind: "Deployment", Name: "zitadel-login"},
+				HelmValues: &config.HelmValuesSpec{Paths: config.HelmValuePaths{Replicas: []string{"login", "replicaCount"}}},
+				Scaling:    config.ScalingSpec{Replicas: true},
+			},
+		},
+	}}
+	report := &Report{Application: "zitadel", Workloads: []WorkloadReport{
+		{
+			Name: "server", Namespace: "zitadel", Deployment: "zitadel", Replicas: 2,
+			Recommendation: Recommendation{
+				CurrentReplicas: 2, RecommendedReplicas: 3,
+				Stability: &RecommendationStability{Replicas: StabilityGate{Status: "stable", Observed: 3, Required: 3}},
+			},
+		},
+		{
+			Name: "login", Namespace: "zitadel", Deployment: "zitadel-login", Replicas: 2,
+			Recommendation: Recommendation{
+				CurrentReplicas: 2, RecommendedReplicas: 3,
+				Stability: &RecommendationStability{Replicas: StabilityGate{Status: "stable", Observed: 3, Required: 3}},
+			},
+		},
+	}}
+
+	AttachPatchPlans(worktree, profile, report)
+	for _, workload := range report.Workloads {
+		plan := workload.Recommendation.PatchPlan
+		if plan == nil || plan.SourceFormat != patchSourceHelmValues || !plan.Needed || len(plan.Changes) != 1 {
+			t.Fatalf("workload %s plan = %#v", workload.Name, plan)
+		}
+	}
+	proposal := BuildProposal(worktree, report)
+	if proposal.Blocked || len(proposal.Files) != 1 || strings.Count(proposal.Files[0].ProposedContent, "replicaCount: 3") != 2 {
+		t.Fatalf("proposal = %#v, want both Helm workloads merged", proposal)
+	}
+}
+
+func TestBuildProposalHelmValuesRejectsStaleCurrentValue(t *testing.T) {
+	worktree := t.TempDir()
+	writeRepoFile(t, worktree, "values.yaml", "replicaCount: 4\n")
+	report := helmProposalReport([]PatchChange{
+		{Field: "spec.replicas", SourcePath: []string{"replicaCount"}, Operation: "replace", Current: "2", Recommended: "3"},
+	})
+
+	proposal := BuildProposal(worktree, report)
+	if !proposal.Blocked || !strings.Contains(strings.Join(proposal.Errors, "\n"), "changed after planning") {
+		t.Fatalf("proposal = %#v, want stale-value block", proposal)
+	}
+}
+
+func TestBuildProposalHelmValuesPreservesChartScalarTypes(t *testing.T) {
+	worktree := t.TempDir()
+	writeRepoFile(t, worktree, "values.yaml", "replicaCount: \"2\"\nresources:\n  requests:\n    cpu: 500m\n")
+	report := helmProposalReport([]PatchChange{
+		{Field: "spec.replicas", SourcePath: []string{"replicaCount"}, Operation: "replace", Current: "2", Recommended: "3"},
+		{Field: "spec.template.spec.containers[name=app].resources.requests.cpu", SourcePath: []string{"resources", "requests", "cpu"}, Operation: "replace", Current: "500m", Recommended: "1"},
+	})
+
+	proposal := BuildProposal(worktree, report)
+	if proposal.Blocked || len(proposal.Files) != 1 {
+		t.Fatalf("proposal = %#v, want applyable Helm values change", proposal)
+	}
+	documents, err := decodeYAMLDocuments([]byte(proposal.Files[0].ProposedContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicas, ok, err := helmScalarNodeAt(documents[0], []string{"replicaCount"})
+	if err != nil || !ok || replicas.Tag != "!!str" || replicas.Value != "3" {
+		t.Fatalf("replica scalar = %#v ok=%t err=%v, want quoted string 3", replicas, ok, err)
+	}
+	cpu, ok, err := helmScalarNodeAt(documents[0], []string{"resources", "requests", "cpu"})
+	if err != nil || !ok || cpu.Tag != "!!str" || cpu.Value != "1" {
+		t.Fatalf("CPU scalar = %#v ok=%t err=%v, want string quantity 1", cpu, ok, err)
+	}
+}
+
+func TestBuildProposalHelmValuesRejectsOverlappingAndMixedSources(t *testing.T) {
+	tests := []struct {
+		name   string
+		plans  []*PatchPlan
+		values string
+		want   string
+	}{
+		{
+			name: "conflicting duplicate path",
+			plans: []*PatchPlan{
+				{SourceFile: "values.yaml", SourceFormat: patchSourceHelmValues, Needed: true, Changes: []PatchChange{{Field: "spec.replicas", SourcePath: []string{"replicaCount"}, Operation: "replace", Current: "2", Recommended: "3"}}},
+				{SourceFile: "values.yaml", SourceFormat: patchSourceHelmValues, Needed: true, Changes: []PatchChange{{Field: "spec.replicas", SourcePath: []string{"replicaCount"}, Operation: "replace", Current: "2", Recommended: "4"}}},
+			},
+			values: "replicaCount: 2\n",
+			want:   "overlap",
+		},
+		{
+			name: "prefix path",
+			plans: []*PatchPlan{
+				{SourceFile: "values.yaml", SourceFormat: patchSourceHelmValues, Needed: true, Changes: []PatchChange{{Field: "spec.replicas", SourcePath: []string{"server"}, Operation: "replace", Current: "2", Recommended: "3"}}},
+				{SourceFile: "values.yaml", SourceFormat: patchSourceHelmValues, Needed: true, Changes: []PatchChange{{Field: "spec.replicas", SourcePath: []string{"server", "replicas"}, Operation: "replace", Current: "2", Recommended: "4"}}},
+			},
+			values: "server:\n  replicas: 2\n",
+			want:   "overlap",
+		},
+		{
+			name: "mixed formats",
+			plans: []*PatchPlan{
+				{SourceFile: "values.yaml", SourceFormat: patchSourceHelmValues, Needed: true, Changes: []PatchChange{{Field: "spec.replicas", SourcePath: []string{"replicaCount"}, Current: "2", Recommended: "3"}}},
+				{SourceFile: "values.yaml", Needed: true, Changes: []PatchChange{{Field: "spec.replicas", Current: "2", Recommended: "3"}}},
+			},
+			values: "replicaCount: 2\n",
+			want:   "mixes",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			worktree := t.TempDir()
+			writeRepoFile(t, worktree, "values.yaml", test.values)
+			report := &Report{Application: "helm", Workloads: make([]WorkloadReport, 0, len(test.plans))}
+			for index, plan := range test.plans {
+				plan.Resource = fmt.Sprintf("Deployment/default/app-%d", index)
+				report.Workloads = append(report.Workloads, WorkloadReport{
+					Namespace: "default", Deployment: fmt.Sprintf("app-%d", index),
+					Recommendation: Recommendation{PatchPlan: plan},
+				})
+			}
+			proposal := BuildProposal(worktree, report)
+			if !proposal.Blocked || !strings.Contains(strings.Join(proposal.Errors, "\n"), test.want) {
+				t.Fatalf("proposal = %#v, want error containing %q", proposal, test.want)
+			}
+		})
+	}
+}
+
+func helmProposalReport(changes []PatchChange) *Report {
+	return &Report{Application: "helm", Workloads: []WorkloadReport{
+		{
+			Namespace: "default", Deployment: "app",
+			Recommendation: Recommendation{PatchPlan: &PatchPlan{
+				SourceFile: "values.yaml", SourceFormat: patchSourceHelmValues,
+				Resource: "Deployment/default/app", Needed: true, Changes: changes,
+			}},
+		},
+	}}
 }
 
 func TestBlockingGitStatusLinesIgnoresProposalArtifacts(t *testing.T) {

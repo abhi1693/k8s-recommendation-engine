@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 func ObserveConvergence(ctx context.Context, worktree, baseBranch string, profile *config.ApplicationProfile, report *Report) *ObservationReport {
@@ -146,8 +147,16 @@ func desiredResourcesFromGit(worktree string, profile *config.ApplicationProfile
 		return desired, "", err
 	}
 	relativeSource := filepath.ToSlash(filepath.Join(basePath, sourceFile))
-	documents, err := readYAMLDocuments(filepath.Join(worktree, basePath, sourceFile))
+	sourcePath, err := resolveExistingGitPath(worktree, filepath.Join(basePath, sourceFile), "workload sourceFile")
 	if err != nil {
+		return desired, relativeSource, err
+	}
+	documents, err := readYAMLDocuments(sourcePath)
+	if err != nil {
+		return desired, relativeSource, err
+	}
+	if workload.HelmValues != nil {
+		desired, err = desiredResourcesFromHelmValues(documents, workload)
 		return desired, relativeSource, err
 	}
 	document := findWorkloadDocument(documents, profile.Spec.Namespace, workload)
@@ -169,27 +178,58 @@ func desiredResourcesFromGit(worktree string, profile *config.ApplicationProfile
 	return desired, relativeSource, nil
 }
 
+func desiredResourcesFromHelmValues(documents []*yaml.Node, workload config.WorkloadSpec) (ObservedResources, error) {
+	var desired ObservedResources
+	if len(documents) != 1 || documents[0].Kind != yaml.MappingNode {
+		return desired, fmt.Errorf("Helm values source must contain exactly one non-empty YAML mapping document")
+	}
+	paths := workload.HelmValues.Paths
+	values := []struct {
+		name   string
+		path   []string
+		assign func(string)
+	}{
+		{name: "replicas", path: paths.Replicas, assign: func(value string) { desired.Replicas = value }},
+		{name: "cpuRequest", path: paths.CPURequest, assign: func(value string) { desired.CPURequest = value }},
+		{name: "memoryRequest", path: paths.MemoryRequest, assign: func(value string) { desired.MemoryRequest = value }},
+	}
+	for _, mapped := range values {
+		if len(mapped.path) == 0 {
+			continue
+		}
+		value, ok, err := helmScalarAt(documents[0], mapped.path)
+		if err != nil {
+			return desired, err
+		}
+		if !ok {
+			return desired, fmt.Errorf("configured Helm value %s for %s does not exist", formatHelmSourcePath(mapped.path), mapped.name)
+		}
+		mapped.assign(value)
+	}
+	return desired, nil
+}
+
 func appendConvergenceFields(fields []FieldObservation, workload config.WorkloadSpec, desired, live ObservedResources) []FieldObservation {
 	fields = append(fields, FieldObservation{
 		Field:   "spec.replicas",
 		Desired: desired.Replicas,
 		Live:    live.Replicas,
 		Managed: workload.Scaling.Replicas,
-		Match:   desired.Replicas == live.Replicas,
+		Match:   helmReplicaValuesEqual(desired.Replicas, live.Replicas),
 	})
 	fields = append(fields, FieldObservation{
 		Field:   "resources.requests.cpu",
 		Desired: desired.CPURequest,
 		Live:    live.CPURequest,
 		Managed: workload.Scaling.CPU,
-		Match:   desired.CPURequest == live.CPURequest,
+		Match:   helmResourceValuesEqual(desired.CPURequest, live.CPURequest),
 	})
 	fields = append(fields, FieldObservation{
 		Field:   "resources.requests.memory",
 		Desired: desired.MemoryRequest,
 		Live:    live.MemoryRequest,
 		Managed: workload.Scaling.Memory,
-		Match:   desired.MemoryRequest == live.MemoryRequest,
+		Match:   helmResourceValuesEqual(desired.MemoryRequest, live.MemoryRequest),
 	})
 	return fields
 }

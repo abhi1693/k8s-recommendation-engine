@@ -362,13 +362,14 @@ func TestWriteActionsReport(t *testing.T) {
 						Memory:     StabilityGate{Status: "stable", Observed: 3, Required: 3},
 					},
 					PatchPlan: &PatchPlan{
-						SourceFile: "shipyard/deployment.yaml",
-						Resource:   "Deployment/shipyardhq/shipyardhq",
-						Needed:     true,
+						SourceFile:   "shipyard/values.yaml",
+						SourceFormat: patchSourceHelmValues,
+						Resource:     "Deployment/shipyardhq/shipyardhq",
+						Needed:       true,
 						Changes: []PatchChange{
-							{Field: "spec.template.spec.containers[name=web].resources.requests.cpu", Operation: "replace", Current: "700m", Recommended: "490m"},
+							{Field: "spec.template.spec.containers[name=web].resources.requests.cpu", SourcePath: []string{"resources", "requests", "cpu"}, Operation: "replace", Current: "700m", Recommended: "490m"},
 						},
-						Diff: "--- a/shipyard/deployment.yaml\n+++ b/shipyard/deployment.yaml\n@@ dry-run @@\n-              cpu: 700m\n+              cpu: 490m\n",
+						Diff: "--- a/shipyard/values.yaml\n+++ b/shipyard/values.yaml\n@@ dry-run @@\n-    cpu: 700m\n+    cpu: 490m\n",
 					},
 				},
 			},
@@ -383,11 +384,13 @@ func TestWriteActionsReport(t *testing.T) {
 	for _, want := range []string{
 		"K8s Recommendation Engine Actions",
 		"apply: yes",
+		"manifest: shipyard/values.yaml format=helmValues",
 		"gates: replicas=hold cpu=stable 3/3 memory=stable 3/3 actionable=true",
 		"changes:",
 		"cpu: 700m -> 490m",
+		`source=helmValues["resources"]["requests"]["cpu"]`,
 		"diff:",
-		"+++ b/shipyard/deployment.yaml",
+		"+++ b/shipyard/values.yaml",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("actions report missing %q:\n%s", want, got)

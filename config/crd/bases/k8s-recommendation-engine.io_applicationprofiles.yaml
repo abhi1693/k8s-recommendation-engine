@@ -184,6 +184,44 @@ spec:
                               type: integer
                           type: object
                       type: object
+                    helmValues:
+                      description: |-
+                        HelmValues maps recommendation fields to existing scalar keys in a Helm values file.
+                        When set, SourceFile is treated as Helm values instead of a rendered Kubernetes manifest.
+                      properties:
+                        paths:
+                          description: Paths maps recommendation fields to ordered
+                            YAML mapping keys.
+                          minProperties: 1
+                          properties:
+                            cpuRequest:
+                              description: CPURequest is the path to the chart value
+                                that renders the target container CPU request.
+                              items:
+                                minLength: 1
+                                type: string
+                              minItems: 1
+                              type: array
+                            memoryRequest:
+                              description: MemoryRequest is the path to the chart
+                                value that renders the target container memory request.
+                              items:
+                                minLength: 1
+                                type: string
+                              minItems: 1
+                              type: array
+                            replicas:
+                              description: Replicas is the path to the chart value
+                                that renders Deployment spec.replicas.
+                              items:
+                                minLength: 1
+                                type: string
+                              minItems: 1
+                              type: array
+                          type: object
+                      required:
+                      - paths
+                      type: object
                     metricProfileRef:
                       minLength: 1
                       type: string
@@ -273,6 +311,22 @@ spec:
                   - name
                   - targetRef
                   type: object
+                  x-kubernetes-validations:
+                  - message: sourceFile is required when helmValues is configured
+                    rule: '!has(self.helmValues) || (has(self.sourceFile) && size(self.sourceFile)
+                      > 0)'
+                  - message: helmValues.paths.replicas is required when replica scaling
+                      is enabled
+                    rule: '!has(self.helmValues) || !has(self.scaling) || !has(self.scaling.replicas)
+                      || !self.scaling.replicas || has(self.helmValues.paths.replicas)'
+                  - message: helmValues.paths.cpuRequest is required when CPU scaling
+                      is enabled
+                    rule: '!has(self.helmValues) || !has(self.scaling) || !has(self.scaling.cpu)
+                      || !self.scaling.cpu || has(self.helmValues.paths.cpuRequest)'
+                  - message: helmValues.paths.memoryRequest is required when memory
+                      scaling is enabled
+                    rule: '!has(self.helmValues) || !has(self.scaling) || !has(self.scaling.memory)
+                      || !self.scaling.memory || has(self.helmValues.paths.memoryRequest)'
                 minItems: 1
                 type: array
             required:
@@ -440,6 +494,27 @@ spec:
                       type: string
                     name:
                       type: string
+                    patch:
+                      description: Patch summarizes Git source planning without storing
+                        the potentially large diff.
+                      properties:
+                        blockReasons:
+                          items:
+                            type: string
+                          type: array
+                        blocked:
+                          type: boolean
+                        errors:
+                          items:
+                            type: string
+                          type: array
+                        needed:
+                          type: boolean
+                        sourceFile:
+                          type: string
+                        sourceFormat:
+                          type: string
+                      type: object
                     readyReplicas:
                       format: int32
                       type: integer

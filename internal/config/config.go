@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path"
+	"strings"
 	"text/template"
 	"time"
 
@@ -48,11 +50,22 @@ type WorkloadSpec struct {
 	Name             string            `yaml:"name" json:"name"`
 	TargetRef        TargetRef         `yaml:"targetRef" json:"targetRef"`
 	SourceFile       string            `yaml:"sourceFile" json:"sourceFile"`
+	HelmValues       *HelmValuesSpec   `yaml:"helmValues,omitempty" json:"helmValues,omitempty"`
 	MetricProfileRef string            `yaml:"metricProfileRef" json:"metricProfileRef"`
 	Scaling          ScalingSpec       `yaml:"scaling" json:"scaling"`
 	Bounds           BoundsSpec        `yaml:"bounds" json:"bounds"`
 	Policy           PolicySpec        `yaml:"policy" json:"policy"`
 	Vars             map[string]string `yaml:"vars" json:"vars"`
+}
+
+type HelmValuesSpec struct {
+	Paths HelmValuePaths `yaml:"paths" json:"paths"`
+}
+
+type HelmValuePaths struct {
+	Replicas      []string `yaml:"replicas,omitempty" json:"replicas,omitempty"`
+	CPURequest    []string `yaml:"cpuRequest,omitempty" json:"cpuRequest,omitempty"`
+	MemoryRequest []string `yaml:"memoryRequest,omitempty" json:"memoryRequest,omitempty"`
 }
 
 type TargetRef struct {
@@ -160,6 +173,9 @@ func (p *ApplicationProfile) Validate() error {
 		if workload.TargetRef.Name == "" {
 			return fmt.Errorf("workload %s targetRef.name is required", workload.Name)
 		}
+		if err := validateHelmValues(workload); err != nil {
+			return err
+		}
 		if _, ok := p.MetricProfiles[workload.MetricProfileRef]; !ok {
 			return fmt.Errorf("workload %s references missing metric profile %q", workload.Name, workload.MetricProfileRef)
 		}
@@ -200,6 +216,9 @@ func (p *ApplicationProfile) Validate() error {
 			return fmt.Errorf("workload %s policy.availabilityRecovery.maxAttemptsPerHour must be non-negative", workload.Name)
 		}
 	}
+	if err := validateHelmValueOwnership(p.Spec.Workloads); err != nil {
+		return err
+	}
 	for _, signal := range p.Spec.SharedSignals {
 		if signal.Name == "" {
 			return fmt.Errorf("shared signal name is required")
@@ -209,6 +228,105 @@ func (p *ApplicationProfile) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateHelmValues(workload WorkloadSpec) error {
+	if workload.HelmValues == nil {
+		return nil
+	}
+	if strings.TrimSpace(workload.SourceFile) == "" {
+		return fmt.Errorf("workload %s sourceFile is required when helmValues is configured", workload.Name)
+	}
+
+	paths := []struct {
+		name    string
+		value   []string
+		enabled bool
+	}{
+		{name: "replicas", value: workload.HelmValues.Paths.Replicas, enabled: workload.Scaling.Replicas},
+		{name: "cpuRequest", value: workload.HelmValues.Paths.CPURequest, enabled: workload.Scaling.CPU},
+		{name: "memoryRequest", value: workload.HelmValues.Paths.MemoryRequest, enabled: workload.Scaling.Memory},
+	}
+	configured := 0
+	for _, path := range paths {
+		if path.enabled && len(path.value) == 0 {
+			return fmt.Errorf("workload %s helmValues.paths.%s is required when the corresponding scaling field is enabled", workload.Name, path.name)
+		}
+		if len(path.value) == 0 {
+			continue
+		}
+		configured++
+		for index, segment := range path.value {
+			if strings.TrimSpace(segment) == "" {
+				return fmt.Errorf("workload %s helmValues.paths.%s[%d] must not be empty", workload.Name, path.name, index)
+			}
+		}
+	}
+	if configured == 0 {
+		return fmt.Errorf("workload %s helmValues must configure at least one value path", workload.Name)
+	}
+	return nil
+}
+
+func validateHelmValueOwnership(workloads []WorkloadSpec) error {
+	type owner struct {
+		workload string
+		field    string
+		path     []string
+	}
+	formats := map[string]bool{}
+	owners := map[string][]owner{}
+	for _, workload := range workloads {
+		if strings.TrimSpace(workload.SourceFile) == "" {
+			continue
+		}
+		sourceFile := path.Clean(strings.ReplaceAll(strings.TrimSpace(workload.SourceFile), "\\", "/"))
+		helm := workload.HelmValues != nil
+		if existing, ok := formats[sourceFile]; ok && existing != helm {
+			return fmt.Errorf("workloads sharing sourceFile %q must not mix Kubernetes manifest and Helm values mappings", sourceFile)
+		}
+		formats[sourceFile] = helm
+		if !helm {
+			continue
+		}
+		paths := []struct {
+			field string
+			value []string
+		}{
+			{field: "replicas", value: workload.HelmValues.Paths.Replicas},
+			{field: "cpuRequest", value: workload.HelmValues.Paths.CPURequest},
+			{field: "memoryRequest", value: workload.HelmValues.Paths.MemoryRequest},
+		}
+		for _, candidate := range paths {
+			if len(candidate.value) == 0 {
+				continue
+			}
+			for _, existing := range owners[sourceFile] {
+				if helmPathsOverlap(existing.path, candidate.value) {
+					return fmt.Errorf("workload %s helmValues.paths.%s overlaps workload %s helmValues.paths.%s in sourceFile %q", workload.Name, candidate.field, existing.workload, existing.field, sourceFile)
+				}
+			}
+			owners[sourceFile] = append(owners[sourceFile], owner{
+				workload: workload.Name,
+				field:    candidate.field,
+				path:     candidate.value,
+			})
+		}
+	}
+	return nil
+}
+
+func helmPathsOverlap(left, right []string) bool {
+	shorter := len(left)
+	if len(right) < shorter {
+		shorter = len(right)
+	}
+	for index := 0; index < shorter; index++ {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validSafetyRisk(risk string) bool {

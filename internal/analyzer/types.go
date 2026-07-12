@@ -413,6 +413,7 @@ type LearnedDecision struct {
 
 type PatchPlan struct {
 	SourceFile   string        `json:"sourceFile"`
+	SourceFormat string        `json:"sourceFormat,omitempty"`
 	Resource     string        `json:"resource"`
 	Needed       bool          `json:"needed"`
 	Blocked      bool          `json:"blocked"`
@@ -423,10 +424,11 @@ type PatchPlan struct {
 }
 
 type PatchChange struct {
-	Field       string `json:"field"`
-	Operation   string `json:"operation"`
-	Current     string `json:"current"`
-	Recommended string `json:"recommended"`
+	Field       string   `json:"field"`
+	SourcePath  []string `json:"sourcePath,omitempty"`
+	Operation   string   `json:"operation"`
+	Current     string   `json:"current"`
+	Recommended string   `json:"recommended"`
 }
 
 type ProposalReport struct {

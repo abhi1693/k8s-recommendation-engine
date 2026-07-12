@@ -138,7 +138,14 @@ func (r *ApplicationProfileReconciler) updateSuccessStatus(ctx context.Context, 
 	resource.Status.Summary, resource.Status.Workloads = reportStatus(report)
 	resource.Status.Proposal = proposalStatus(report)
 	resource.Status.Git = gitStatus(report)
-	degraded := resource.Status.Summary.Degraded > 0 || resource.Status.Summary.Unhealthy > 0 || resource.Status.Summary.Emergencies > 0
+	patchFailed := false
+	for _, workload := range resource.Status.Workloads {
+		if workload.Patch != nil && len(workload.Patch.Errors) > 0 {
+			patchFailed = true
+			break
+		}
+	}
+	degraded := resource.Status.Summary.Degraded > 0 || resource.Status.Summary.Unhealthy > 0 || patchFailed || resource.Status.Summary.Emergencies > 0
 	setCondition(&resource.Status, resource.Generation, ConditionReady, metav1.ConditionTrue, "Reconciled", "Latest profile reconciliation completed", now)
 	setCondition(&resource.Status, resource.Generation, ConditionSuspended, metav1.ConditionFalse, "Active", "Profile reconciliation is active", now)
 	if degraded {
@@ -219,7 +226,12 @@ func reportStatus(report *analyzer.Report) (recommendationv1alpha1.ApplicationPr
 	}
 	workloads := make([]recommendationv1alpha1.WorkloadStatus, 0, len(report.Workloads))
 	for _, workload := range report.Workloads {
-		if workload.Recommendation.Blocked {
+		blocked := workload.Recommendation.Blocked
+		plan := workload.Recommendation.PatchPlan
+		if plan != nil && (plan.Blocked || len(plan.Errors) > 0) {
+			blocked = true
+		}
+		if blocked {
 			summary.Blocked++
 		}
 		if workload.Availability.Emergency {
@@ -238,8 +250,22 @@ func reportStatus(report *analyzer.Report) (recommendationv1alpha1.ApplicationPr
 			MetricsCondition:         workload.MetricsCondition,
 			Confidence:               workload.Recommendation.Confidence,
 			Safety:                   workload.Recommendation.Safety.Classification,
-			Blocked:                  workload.Recommendation.Blocked,
+			Blocked:                  blocked,
 			Emergency:                workload.Availability.Emergency,
+		}
+		if plan != nil {
+			sourceFormat := plan.SourceFormat
+			if sourceFormat == "" {
+				sourceFormat = "kubernetesManifest"
+			}
+			item.Patch = &recommendationv1alpha1.WorkloadPatchStatus{
+				SourceFile:   plan.SourceFile,
+				SourceFormat: sourceFormat,
+				Needed:       plan.Needed,
+				Blocked:      plan.Blocked || len(plan.Errors) > 0,
+				BlockReasons: append([]string(nil), plan.BlockReasons...),
+				Errors:       append([]string(nil), plan.Errors...),
+			}
 		}
 		if workload.Recovery != nil {
 			item.Recovery = &recommendationv1alpha1.RecoveryStatus{

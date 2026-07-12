@@ -602,6 +602,239 @@ func TestAttachPatchPlansRejectsSourceOutsideWorktree(t *testing.T) {
 	}
 }
 
+func TestAttachPatchPlansHelmValuesUsesMappedScalarPaths(t *testing.T) {
+	worktree := t.TempDir()
+	valuesPath := filepath.Join(worktree, "zitadel", "values.yaml")
+	if err := os.MkdirAll(filepath.Dir(valuesPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(valuesPath, []byte(`
+# chart settings stay intact
+login:
+  replicaCount: 2 # replica baseline
+
+  resources:
+    requests:
+      cpu: "0.05" # CPU baseline
+      memory: 128Mi
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := helmPatchProfile("zitadel-login", config.HelmValuePaths{
+		Replicas:      []string{"login", "replicaCount"},
+		CPURequest:    []string{"login", "resources", "requests", "cpu"},
+		MemoryRequest: []string{"login", "resources", "requests", "memory"},
+	})
+	report := helmPatchReport(2, "50m", "128Mi")
+	report.Workloads[0].Recommendation.RecommendedReplicas = 3
+	report.Workloads[0].Recommendation.RecommendedCPURequest = "40m"
+	report.Workloads[0].Recommendation.RecommendedMemoryRequest = "96Mi"
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || plan.SourceFormat != patchSourceHelmValues || !plan.Needed || len(plan.Errors) != 0 {
+		t.Fatalf("PatchPlan = %#v, want applyable Helm values plan", plan)
+	}
+	if len(plan.Changes) != 3 {
+		t.Fatalf("Changes = %#v, want replicas, CPU, and memory", plan.Changes)
+	}
+	wantPaths := map[string][]string{
+		"spec.replicas": []string{"login", "replicaCount"},
+		"spec.template.spec.containers[name=zitadel-login].resources.requests.cpu":    []string{"login", "resources", "requests", "cpu"},
+		"spec.template.spec.containers[name=zitadel-login].resources.requests.memory": []string{"login", "resources", "requests", "memory"},
+	}
+	for _, change := range plan.Changes {
+		want, ok := wantPaths[change.Field]
+		if !ok || compareHelmPaths(change.SourcePath, want) != 0 {
+			t.Fatalf("change = %#v, want semantic field with mapped source path", change)
+		}
+		if change.Operation != "replace" {
+			t.Fatalf("change operation = %q, want replace", change.Operation)
+		}
+	}
+	for _, want := range []string{"# chart settings stay intact", "# replica baseline", "# CPU baseline", "replicaCount: 3", `cpu: "40m"`, "memory: 96Mi"} {
+		if !strings.Contains(plan.Diff, want) {
+			t.Fatalf("PatchPlan.Diff missing %q:\n%s", want, plan.Diff)
+		}
+	}
+	proposal := BuildProposal(worktree, report)
+	if proposal.Blocked || len(proposal.Files) != 1 || proposal.Files[0].Diff != plan.Diff {
+		t.Fatalf("proposal diff does not match the displayed Helm plan diff:\nplan:\n%s\nproposal: %#v", plan.Diff, proposal)
+	}
+}
+
+func TestAttachPatchPlansHelmValuesTreatsEquivalentQuantityAsUnchanged(t *testing.T) {
+	worktree := t.TempDir()
+	valuesDir := filepath.Join(worktree, "zitadel")
+	if err := os.MkdirAll(valuesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(valuesDir, "values.yaml"), []byte("resources:\n  requests:\n    cpu: 0.05\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := helmPatchProfile("zitadel", config.HelmValuePaths{CPURequest: []string{"resources", "requests", "cpu"}})
+	profile.Spec.Workloads[0].Scaling = config.ScalingSpec{CPU: true}
+	report := helmPatchReport(2, "50m", "128Mi")
+	report.Workloads[0].Deployment = "zitadel"
+	report.Workloads[0].Containers[0].Name = "zitadel"
+	report.Workloads[0].Recommendation.RecommendedCPURequest = "50m"
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || plan.Needed || len(plan.Changes) != 0 || len(plan.Errors) != 0 {
+		t.Fatalf("PatchPlan = %#v, want no semantic quantity change", plan)
+	}
+}
+
+func TestAttachPatchPlansHelmValuesRejectsUnsafeSources(t *testing.T) {
+	tests := []struct {
+		name   string
+		values string
+		live   string
+		want   string
+	}{
+		{name: "missing path", values: "resources: {}\n", live: "50m", want: "does not exist"},
+		{name: "non scalar", values: "resources:\n  requests:\n    cpu: {}\n", live: "50m", want: "existing non-null scalar"},
+		{name: "baseline mismatch", values: "resources:\n  requests:\n    cpu: 100m\n", live: "50m", want: "mapping may be wrong or Fleet is not converged"},
+		{name: "live request absent", values: "resources:\n  requests:\n    cpu: 50m\n", live: "", want: "does not have a cpu request"},
+		{name: "multiple documents", values: "resources:\n  requests:\n    cpu: 50m\n---\nother: value\n", live: "50m", want: "exactly one non-empty YAML document"},
+		{name: "merge key", values: "defaults: &defaults\n  cpu: 50m\nresources:\n  requests:\n    <<: *defaults\n", live: "50m", want: "YAML merge key"},
+		{name: "anchor", values: "resources:\n  requests:\n    cpu: &shared-cpu 50m\n", live: "50m", want: "YAML anchor"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			worktree := t.TempDir()
+			valuesDir := filepath.Join(worktree, "zitadel")
+			if err := os.MkdirAll(valuesDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(valuesDir, "values.yaml"), []byte(test.values), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			profile := helmPatchProfile("zitadel", config.HelmValuePaths{CPURequest: []string{"resources", "requests", "cpu"}})
+			profile.Spec.Workloads[0].Scaling = config.ScalingSpec{CPU: true}
+			report := helmPatchReport(2, test.live, "128Mi")
+			report.Workloads[0].Deployment = "zitadel"
+			report.Workloads[0].Containers[0].Name = "zitadel"
+
+			AttachPatchPlans(worktree, profile, report)
+			plan := report.Workloads[0].Recommendation.PatchPlan
+			if plan == nil || !strings.Contains(strings.Join(plan.Errors, "\n"), test.want) {
+				t.Fatalf("PatchPlan errors = %#v, want substring %q", plan, test.want)
+			}
+		})
+	}
+}
+
+func TestAttachPatchPlansHelmValuesRejectsMultipleLiveContainers(t *testing.T) {
+	worktree := t.TempDir()
+	valuesDir := filepath.Join(worktree, "zitadel")
+	if err := os.MkdirAll(valuesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(valuesDir, "values.yaml"), []byte("resources:\n  requests:\n    cpu: 50m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := helmPatchProfile("zitadel", config.HelmValuePaths{CPURequest: []string{"resources", "requests", "cpu"}})
+	profile.Spec.Workloads[0].Scaling = config.ScalingSpec{CPU: true}
+	report := helmPatchReport(2, "50m", "128Mi")
+	report.Workloads[0].Containers = []ContainerReport{{Name: "server"}, {Name: "sidecar"}}
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || !strings.Contains(strings.Join(plan.Errors, "\n"), "require exactly one regular container") {
+		t.Fatalf("PatchPlan = %#v, want multi-container mapping error", plan)
+	}
+}
+
+func TestAttachPatchPlansRejectsSourceSymlinkOutsideWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(outside, []byte("replicaCount: 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "zitadel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(worktree, "zitadel", "values.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	profile := helmPatchProfile("zitadel", config.HelmValuePaths{Replicas: []string{"replicaCount"}})
+	profile.Spec.Workloads[0].Scaling = config.ScalingSpec{Replicas: true}
+	report := helmPatchReport(2, "50m", "128Mi")
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || !strings.Contains(strings.Join(plan.Errors, "\n"), "resolves outside the Git worktree") {
+		t.Fatalf("PatchPlan = %#v, want symlink containment error", plan)
+	}
+}
+
+func TestAttachPatchPlansRejectsSourceSymlinkInsideWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	valuesDir := filepath.Join(worktree, "zitadel")
+	if err := os.MkdirAll(valuesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realValues := filepath.Join(valuesDir, "shared-values.yaml")
+	if err := os.WriteFile(realValues, []byte("replicaCount: 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("shared-values.yaml", filepath.Join(valuesDir, "values.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	profile := helmPatchProfile("zitadel", config.HelmValuePaths{Replicas: []string{"replicaCount"}})
+	profile.Spec.Workloads[0].Scaling = config.ScalingSpec{Replicas: true}
+	report := helmPatchReport(2, "50m", "128Mi")
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || !strings.Contains(strings.Join(plan.Errors, "\n"), "must not resolve through a symlink") {
+		t.Fatalf("PatchPlan = %#v, want in-worktree symlink rejection", plan)
+	}
+}
+
+func helmPatchProfile(target string, paths config.HelmValuePaths) *config.ApplicationProfile {
+	return &config.ApplicationProfile{Spec: config.ApplicationSpec{
+		Namespace: "zitadel",
+		Git:       config.GitSpec{BasePath: "zitadel"},
+		Workloads: []config.WorkloadSpec{
+			{
+				Name:       "server",
+				SourceFile: "values.yaml",
+				TargetRef:  config.TargetRef{Kind: "Deployment", Name: target},
+				HelmValues: &config.HelmValuesSpec{Paths: paths},
+				Scaling:    config.ScalingSpec{Replicas: true, CPU: true, Memory: true},
+			},
+		},
+	}}
+}
+
+func helmPatchReport(replicas int32, cpu, memory string) *Report {
+	return &Report{Workloads: []WorkloadReport{
+		{
+			Name:       "server",
+			Namespace:  "zitadel",
+			Deployment: "zitadel-login",
+			Replicas:   replicas,
+			Containers: []ContainerReport{{Name: "zitadel-login", CPURequest: cpu, MemoryRequest: memory}},
+			Recommendation: Recommendation{
+				CurrentReplicas:          replicas,
+				RecommendedReplicas:      replicas,
+				CurrentCPURequest:        cpu,
+				RecommendedCPURequest:    cpu,
+				CurrentMemoryRequest:     memory,
+				RecommendedMemoryRequest: memory,
+				Stability: &RecommendationStability{
+					Replicas: StabilityGate{Status: "stable", Observed: 3, Required: 3},
+					CPU:      StabilityGate{Status: "stable", Observed: 3, Required: 3},
+					Memory:   StabilityGate{Status: "stable", Observed: 3, Required: 3},
+				},
+			},
+		},
+	}}
+}
+
 func containsString(value, want string) bool {
 	return strings.Contains(value, want)
 }

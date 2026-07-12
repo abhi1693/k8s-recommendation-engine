@@ -308,7 +308,7 @@ func WriteActionsReport(w io.Writer, report *Report, gitWorktreeEnabled bool) er
 			}
 			continue
 		}
-		if _, err := fmt.Fprintf(w, "  manifest: %s resource=%s\n", emptyDash(plan.SourceFile), emptyDash(plan.Resource)); err != nil {
+		if _, err := fmt.Fprintf(w, "  manifest: %s format=%s resource=%s\n", emptyDash(plan.SourceFile), patchSourceFormatLabel(plan.SourceFormat), emptyDash(plan.Resource)); err != nil {
 			return err
 		}
 		for _, reason := range plan.BlockReasons {
@@ -343,7 +343,7 @@ func WriteActionsReport(w io.Writer, report *Report, gitWorktreeEnabled bool) er
 				return err
 			}
 			for _, change := range plan.Changes {
-				if _, err := fmt.Fprintf(w, "    - %s %s: %s -> %s\n", change.Operation, change.Field, change.Current, change.Recommended); err != nil {
+				if _, err := fmt.Fprintf(w, "    - %s %s: %s -> %s%s\n", change.Operation, change.Field, change.Current, change.Recommended, patchChangeSourceSuffix(change)); err != nil {
 					return err
 				}
 			}
@@ -962,7 +962,7 @@ func writePrettySeasonality(w io.Writer, seasonality *SeasonalityLearning) error
 }
 
 func writePrettyPatchPlan(w io.Writer, plan *PatchPlan) error {
-	if _, err := fmt.Fprintf(w, "    patch plan: source=%s needed=%t blocked=%t\n", emptyDash(plan.SourceFile), plan.Needed, plan.Blocked); err != nil {
+	if _, err := fmt.Fprintf(w, "    patch plan: source=%s format=%s needed=%t blocked=%t\n", emptyDash(plan.SourceFile), patchSourceFormatLabel(plan.SourceFormat), plan.Needed, plan.Blocked); err != nil {
 		return err
 	}
 	if len(plan.BlockReasons) > 0 {
@@ -976,7 +976,7 @@ func writePrettyPatchPlan(w io.Writer, plan *PatchPlan) error {
 		}
 	}
 	for _, change := range plan.Changes {
-		if _, err := fmt.Fprintf(w, "      - %s %s: %s -> %s\n", change.Operation, change.Field, change.Current, change.Recommended); err != nil {
+		if _, err := fmt.Fprintf(w, "      - %s %s: %s -> %s%s\n", change.Operation, change.Field, change.Current, change.Recommended, patchChangeSourceSuffix(change)); err != nil {
 			return err
 		}
 	}
@@ -1059,7 +1059,7 @@ func compactReplicaComponents(components []ReplicaDecisionComponent) string {
 }
 
 func writePatchPlan(w io.Writer, plan *PatchPlan) error {
-	if _, err := fmt.Fprintf(w, "        patch plan: source=%s needed=%t blocked=%t\n", emptyDash(plan.SourceFile), plan.Needed, plan.Blocked); err != nil {
+	if _, err := fmt.Fprintf(w, "        patch plan: source=%s format=%s needed=%t blocked=%t\n", emptyDash(plan.SourceFile), patchSourceFormatLabel(plan.SourceFormat), plan.Needed, plan.Blocked); err != nil {
 		return err
 	}
 	if len(plan.BlockReasons) > 0 {
@@ -1073,11 +1073,25 @@ func writePatchPlan(w io.Writer, plan *PatchPlan) error {
 		}
 	}
 	for _, change := range plan.Changes {
-		if _, err := fmt.Fprintf(w, "          - %s %s: %s -> %s\n", change.Operation, change.Field, change.Current, change.Recommended); err != nil {
+		if _, err := fmt.Fprintf(w, "          - %s %s: %s -> %s%s\n", change.Operation, change.Field, change.Current, change.Recommended, patchChangeSourceSuffix(change)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func patchChangeSourceSuffix(change PatchChange) string {
+	if len(change.SourcePath) == 0 {
+		return ""
+	}
+	return " source=" + formatHelmSourcePath(change.SourcePath)
+}
+
+func patchSourceFormatLabel(format string) string {
+	if format == "" {
+		return patchSourceKubernetesManifest
+	}
+	return format
 }
 
 func signalStatus(signal SignalReport) string {

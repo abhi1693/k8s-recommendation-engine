@@ -269,12 +269,23 @@ func WriteProposalBatchStatus(w io.Writer, report *ProposalBatchStatusReport) er
 			return err
 		}
 		for _, change := range item.Changes {
-			if _, err := fmt.Fprintf(w, "    - %s %s: %s -> %s\n", change.Operation, change.Field, change.Current, change.Recommended); err != nil {
+			if _, err := fmt.Fprintf(w, "    - %s %s: %s -> %s%s\n", change.Operation, change.Field, change.Current, change.Recommended, proposalBatchSourceSuffix(change)); err != nil {
 				return err
 			}
 		}
 	}
 	return writeProposalBatchSummary(w, report)
+}
+
+func proposalBatchSourceSuffix(change analyzer.PatchChange) string {
+	if len(change.SourcePath) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(change.SourcePath)
+	if err != nil {
+		return ""
+	}
+	return " sourcePath=" + string(encoded)
 }
 
 func writeProposalBatchSummary(w io.Writer, report *ProposalBatchStatusReport) error {

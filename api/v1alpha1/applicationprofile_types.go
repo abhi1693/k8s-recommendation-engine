@@ -63,12 +63,20 @@ type SharedSignal struct {
 	Vars map[string]string `json:"vars,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.helmValues) || (has(self.sourceFile) && size(self.sourceFile) > 0)",message="sourceFile is required when helmValues is configured"
+// +kubebuilder:validation:XValidation:rule="!has(self.helmValues) || !has(self.scaling) || !has(self.scaling.replicas) || !self.scaling.replicas || has(self.helmValues.paths.replicas)",message="helmValues.paths.replicas is required when replica scaling is enabled"
+// +kubebuilder:validation:XValidation:rule="!has(self.helmValues) || !has(self.scaling) || !has(self.scaling.cpu) || !self.scaling.cpu || has(self.helmValues.paths.cpuRequest)",message="helmValues.paths.cpuRequest is required when CPU scaling is enabled"
+// +kubebuilder:validation:XValidation:rule="!has(self.helmValues) || !has(self.scaling) || !has(self.scaling.memory) || !self.scaling.memory || has(self.helmValues.paths.memoryRequest)",message="helmValues.paths.memoryRequest is required when memory scaling is enabled"
 type WorkloadSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Name      string    `json:"name"`
 	TargetRef TargetRef `json:"targetRef"`
 	// +optional
 	SourceFile string `json:"sourceFile,omitempty"`
+	// HelmValues maps recommendation fields to existing scalar keys in a Helm values file.
+	// When set, SourceFile is treated as Helm values instead of a rendered Kubernetes manifest.
+	// +optional
+	HelmValues *HelmValuesSpec `json:"helmValues,omitempty"`
 	// +kubebuilder:validation:MinLength=1
 	MetricProfileRef string `json:"metricProfileRef"`
 	// +optional
@@ -79,6 +87,33 @@ type WorkloadSpec struct {
 	Policy PolicySpec `json:"policy,omitempty"`
 	// +optional
 	Vars map[string]string `json:"vars,omitempty"`
+}
+
+// HelmValuesSpec configures fields managed in a Helm values file.
+type HelmValuesSpec struct {
+	// Paths maps recommendation fields to ordered YAML mapping keys.
+	Paths HelmValuePaths `json:"paths"`
+}
+
+// HelmValuePaths identifies the ordered mapping keys for fields managed in a Helm values file.
+// Each path must point to an existing scalar so a misspelled chart key cannot be silently added.
+// +kubebuilder:validation:MinProperties=1
+type HelmValuePaths struct {
+	// Replicas is the path to the chart value that renders Deployment spec.replicas.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +optional
+	Replicas []string `json:"replicas,omitempty"`
+	// CPURequest is the path to the chart value that renders the target container CPU request.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +optional
+	CPURequest []string `json:"cpuRequest,omitempty"`
+	// MemoryRequest is the path to the chart value that renders the target container memory request.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +optional
+	MemoryRequest []string `json:"memoryRequest,omitempty"`
 }
 
 type TargetRef struct {
@@ -258,8 +293,26 @@ type WorkloadStatus struct {
 	Blocked bool `json:"blocked,omitempty"`
 	// +optional
 	Emergency bool `json:"emergency,omitempty"`
+	// Patch summarizes Git source planning without storing the potentially large diff.
+	// +optional
+	Patch *WorkloadPatchStatus `json:"patch,omitempty"`
 	// +optional
 	Recovery *RecoveryStatus `json:"recovery,omitempty"`
+}
+
+type WorkloadPatchStatus struct {
+	// +optional
+	SourceFile string `json:"sourceFile,omitempty"`
+	// +optional
+	SourceFormat string `json:"sourceFormat,omitempty"`
+	// +optional
+	Needed bool `json:"needed,omitempty"`
+	// +optional
+	Blocked bool `json:"blocked,omitempty"`
+	// +optional
+	BlockReasons []string `json:"blockReasons,omitempty"`
+	// +optional
+	Errors []string `json:"errors,omitempty"`
 }
 
 type RecoveryStatus struct {

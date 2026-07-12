@@ -83,18 +83,25 @@ func TestControllerManagerReconcilesMultipleApplicationProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sample, err := os.ReadFile(filepath.Join("..", "..", "config", "samples", "k8s-recommendation-engine_v1alpha1_applicationprofile.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	template := &recommendationv1alpha1.ApplicationProfile{}
-	if err := yaml.Unmarshal(sample, template); err != nil {
-		t.Fatal(err)
+	fixtures := []struct {
+		name string
+		file string
+	}{
+		{name: "example-manifest", file: "k8s-recommendation-engine_v1alpha1_applicationprofile.yaml"},
+		{name: "example-helm-values", file: "k8s-recommendation-engine_v1alpha1_applicationprofile_helm_values.yaml"},
 	}
 	var resources []*recommendationv1alpha1.ApplicationProfile
-	for _, name := range []string{"example-a", "example-b"} {
-		resource := template.DeepCopy()
-		resource.Name = name
+	var helmTemplate *recommendationv1alpha1.ApplicationProfile
+	for _, fixture := range fixtures {
+		sample, err := os.ReadFile(filepath.Join("..", "..", "config", "samples", fixture.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resource := &recommendationv1alpha1.ApplicationProfile{}
+		if err := yaml.Unmarshal(sample, resource); err != nil {
+			t.Fatal(err)
+		}
+		resource.Name = fixture.name
 		resource.Namespace = "default"
 		resource.Spec.Suspend = false
 		resource.ResourceVersion = ""
@@ -104,6 +111,39 @@ func TestControllerManagerReconcilesMultipleApplicationProfiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		resources = append(resources, resource)
+		if resource.Spec.Workloads[0].HelmValues != nil {
+			helmTemplate = resource.DeepCopy()
+		}
+	}
+	if helmTemplate == nil {
+		t.Fatal("Helm values sample did not contain a helmValues mapping")
+	}
+	invalid := helmTemplate.DeepCopy()
+	invalid.Name = "invalid-empty-helm-paths"
+	invalid.ResourceVersion = ""
+	invalid.UID = ""
+	invalid.CreationTimestamp = metav1.Time{}
+	invalid.Spec.Workloads[0].HelmValues.Paths = recommendationv1alpha1.HelmValuePaths{}
+	if err := directClient.Create(context.Background(), invalid); err == nil {
+		t.Fatal("CRD accepted helmValues.paths without any configured path")
+	}
+	missingSource := helmTemplate.DeepCopy()
+	missingSource.Name = "invalid-helm-source"
+	missingSource.ResourceVersion = ""
+	missingSource.UID = ""
+	missingSource.CreationTimestamp = metav1.Time{}
+	missingSource.Spec.Workloads[0].SourceFile = ""
+	if err := directClient.Create(context.Background(), missingSource); err == nil {
+		t.Fatal("CRD accepted helmValues without sourceFile")
+	}
+	missingCPUPath := helmTemplate.DeepCopy()
+	missingCPUPath.Name = "invalid-helm-cpu-path"
+	missingCPUPath.ResourceVersion = ""
+	missingCPUPath.UID = ""
+	missingCPUPath.CreationTimestamp = metav1.Time{}
+	missingCPUPath.Spec.Workloads[0].HelmValues.Paths.CPURequest = nil
+	if err := directClient.Create(context.Background(), missingCPUPath); err == nil {
+		t.Fatal("CRD accepted CPU scaling without helmValues.paths.cpuRequest")
 	}
 
 	deadline := time.Now().Add(15 * time.Second)

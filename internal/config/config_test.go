@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRenderQuery(t *testing.T) {
 	got, err := RenderQuery(`up{namespace="{{ .namespace }}",deployment="{{ .deployment }}"}`, map[string]string{
@@ -76,6 +79,122 @@ func TestValidateRejectsInvalidAvailabilityRecoveryPolicy(t *testing.T) {
 			test.mutate(&profile.Spec.Workloads[0].Policy.AvailabilityRecovery)
 			if err := profile.Validate(); err == nil {
 				t.Fatal("Validate() expected availability recovery policy error")
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsHelmValuePaths(t *testing.T) {
+	profile := validTestProfile()
+	workload := &profile.Spec.Workloads[0]
+	workload.SourceFile = "values.yaml"
+	workload.Scaling = ScalingSpec{Replicas: true, CPU: true, Memory: true}
+	workload.HelmValues = &HelmValuesSpec{Paths: HelmValuePaths{
+		Replicas:      []string{"replicaCount"},
+		CPURequest:    []string{"server", "resources", "requests", "cpu"},
+		MemoryRequest: []string{"server", "resources", "requests", "memory"},
+	}}
+	if err := profile.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidHelmValueMappings(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		edit func(*ApplicationProfile)
+	}{
+		{
+			name: "missing source file",
+			want: "sourceFile is required",
+			edit: func(profile *ApplicationProfile) {
+				profile.Spec.Workloads[0].HelmValues = &HelmValuesSpec{Paths: HelmValuePaths{Replicas: []string{"replicaCount"}}}
+			},
+		},
+		{
+			name: "missing enabled mapping",
+			want: "helmValues.paths.cpuRequest is required",
+			edit: func(profile *ApplicationProfile) {
+				workload := &profile.Spec.Workloads[0]
+				workload.SourceFile = "values.yaml"
+				workload.Scaling.CPU = true
+				workload.HelmValues = &HelmValuesSpec{Paths: HelmValuePaths{Replicas: []string{"replicaCount"}}}
+			},
+		},
+		{
+			name: "empty segment",
+			want: "must not be empty",
+			edit: func(profile *ApplicationProfile) {
+				workload := &profile.Spec.Workloads[0]
+				workload.SourceFile = "values.yaml"
+				workload.HelmValues = &HelmValuesSpec{Paths: HelmValuePaths{CPURequest: []string{"resources", "", "cpu"}}}
+			},
+		},
+		{
+			name: "empty paths",
+			want: "must configure at least one value path",
+			edit: func(profile *ApplicationProfile) {
+				workload := &profile.Spec.Workloads[0]
+				workload.SourceFile = "values.yaml"
+				workload.HelmValues = &HelmValuesSpec{}
+			},
+		},
+		{
+			name: "overlapping paths",
+			want: "overlaps workload web",
+			edit: func(profile *ApplicationProfile) {
+				workload := &profile.Spec.Workloads[0]
+				workload.SourceFile = "values.yaml"
+				workload.HelmValues = &HelmValuesSpec{Paths: HelmValuePaths{
+					CPURequest:    []string{"resources"},
+					MemoryRequest: []string{"resources", "requests", "memory"},
+				}}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := validTestProfile()
+			test.edit(profile)
+			err := profile.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsSharedHelmPathOwnershipAndMixedFormats(t *testing.T) {
+	tests := []struct {
+		name       string
+		secondHelm bool
+		secondPath []string
+		want       string
+	}{
+		{name: "duplicate ownership", secondHelm: true, secondPath: []string{"resources", "requests", "cpu"}, want: "overlaps workload web"},
+		{name: "prefix ownership", secondHelm: true, secondPath: []string{"resources", "requests"}, want: "overlaps workload web"},
+		{name: "mixed formats", secondHelm: false, want: "must not mix"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := validTestProfile()
+			first := &profile.Spec.Workloads[0]
+			first.SourceFile = "charts/../values.yaml"
+			first.HelmValues = &HelmValuesSpec{Paths: HelmValuePaths{CPURequest: []string{"resources", "requests", "cpu"}}}
+			second := *first
+			second.Name = "worker"
+			second.TargetRef.Name = "worker"
+			second.SourceFile = "values.yaml"
+			if test.secondHelm {
+				second.HelmValues = &HelmValuesSpec{Paths: HelmValuePaths{CPURequest: test.secondPath}}
+			} else {
+				second.HelmValues = nil
+			}
+			profile.Spec.Workloads = append(profile.Spec.Workloads, second)
+			err := profile.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, test.want)
 			}
 		})
 	}

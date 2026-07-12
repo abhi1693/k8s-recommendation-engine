@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,6 +78,26 @@ func TestProfileConfigUsesExplicitMigrationStateKey(t *testing.T) {
 	}
 }
 
+func TestProfileConfigPreservesHelmValuePaths(t *testing.T) {
+	resource := validProfileResource()
+	workload := &resource.Spec.Workloads[0]
+	workload.SourceFile = "values.yaml"
+	workload.Scaling = recommendationv1alpha1.ScalingSpec{Replicas: true, CPU: true, Memory: true}
+	workload.HelmValues = &recommendationv1alpha1.HelmValuesSpec{Paths: recommendationv1alpha1.HelmValuePaths{
+		Replicas:      []string{"server", "replicaCount"},
+		CPURequest:    []string{"server", "resources", "requests", "cpu"},
+		MemoryRequest: []string{"server", "resources", "requests", "memory"},
+	}}
+	profile, err := profileConfig(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := profile.Spec.Workloads[0].HelmValues
+	if got == nil || strings.Join(got.Paths.Replicas, "/") != "server/replicaCount" || strings.Join(got.Paths.CPURequest, "/") != "server/resources/requests/cpu" || strings.Join(got.Paths.MemoryRequest, "/") != "server/resources/requests/memory" {
+		t.Fatalf("converted Helm paths = %#v", got)
+	}
+}
+
 func TestReconcileSuspendedProfileDoesNotProcess(t *testing.T) {
 	resource := validProfileResource()
 	resource.Spec.Suspend = true
@@ -94,6 +115,34 @@ func TestReconcileSuspendedProfileDoesNotProcess(t *testing.T) {
 	suspended := apiMeta.FindStatusCondition(updated.Status.Conditions, ConditionSuspended)
 	if suspended == nil || suspended.Status != metav1.ConditionTrue {
 		t.Fatalf("Suspended condition = %#v", suspended)
+	}
+}
+
+func TestReconcileSurfacesPatchPlanningErrorsAsDegraded(t *testing.T) {
+	resource := validProfileResource()
+	report := healthyReport()
+	report.Workloads[0].Recommendation.PatchPlan = &analyzer.PatchPlan{
+		SourceFile:   "apps/values.yaml",
+		SourceFormat: "helmValues",
+		Errors:       []string{`configured Helm value helmValues["resources"]["requests"]["cpu"] does not exist`},
+	}
+	processor := &fakeProcessor{report: report}
+	reconciler, kubeClient := testReconciler(t, resource, processor)
+
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(resource)}); err != nil {
+		t.Fatal(err)
+	}
+	updated := getProfile(t, kubeClient, resource)
+	if updated.Status.Summary.Blocked != 1 || len(updated.Status.Workloads) != 1 || !updated.Status.Workloads[0].Blocked {
+		t.Fatalf("status did not surface patch block: %#v", updated.Status)
+	}
+	patch := updated.Status.Workloads[0].Patch
+	if patch == nil || !patch.Blocked || patch.SourceFormat != "helmValues" || len(patch.Errors) != 1 {
+		t.Fatalf("patch status = %#v", patch)
+	}
+	degraded := apiMeta.FindStatusCondition(updated.Status.Conditions, ConditionDegraded)
+	if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != "WorkloadsDegraded" {
+		t.Fatalf("Degraded condition = %#v", degraded)
 	}
 }
 

@@ -1,0 +1,67 @@
+apiVersion: k8s-recommendation-engine.io/v1alpha1
+kind: ApplicationProfile
+metadata:
+  name: zitadel-helm-values-example
+  namespace: k8s-recommendation-engine-system
+spec:
+  namespace: zitadel
+  suspend: true
+  git:
+    provider: github
+    mode: fleet
+    repository: https://github.com/example/home-lab.git
+    branch: master
+    basePath: kubernetes/apps/zitadel
+  workloads:
+    - name: server
+      targetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: zitadel
+      sourceFile: values.yaml
+      helmValues:
+        paths:
+          replicas: [replicaCount]
+          cpuRequest: [resources, requests, cpu]
+          memoryRequest: [resources, requests, memory]
+      metricProfileRef: resource-only
+      scaling:
+        replicas: true
+        cpu: true
+        memory: true
+      vars:
+        container: zitadel
+    - name: login
+      targetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: zitadel-login
+      sourceFile: values.yaml
+      helmValues:
+        paths:
+          replicas: [login, replicaCount]
+          cpuRequest: [login, resources, requests, cpu]
+          memoryRequest: [login, resources, requests, memory]
+      metricProfileRef: resource-only
+      scaling:
+        replicas: true
+        cpu: true
+        memory: true
+      vars:
+        container: zitadel-login
+  metricProfiles:
+    resource-only:
+      description: Deployment CPU, memory, and availability signals.
+      signals:
+        cpu_usage:
+          required: true
+          query: |
+            sum(rate(container_cpu_usage_seconds_total{namespace="{{ .namespace }}",container="{{ .container }}"}[5m]))
+        memory_working_set:
+          required: true
+          query: |
+            sum(container_memory_working_set_bytes{namespace="{{ .namespace }}",container="{{ .container }}"})
+        available_replicas:
+          required: true
+          query: |
+            max(kube_deployment_status_replicas_available{namespace="{{ .namespace }}",deployment="{{ .deployment }}"})

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -85,7 +86,13 @@ func BuildProposal(worktree string, report *Report) *ProposalReport {
 		return proposal
 	}
 
-	for sourceFile, plans := range plansByFile {
+	sourceFiles := make([]string, 0, len(plansByFile))
+	for sourceFile := range plansByFile {
+		sourceFiles = append(sourceFiles, sourceFile)
+	}
+	sort.Strings(sourceFiles)
+	for _, sourceFile := range sourceFiles {
+		plans := plansByFile[sourceFile]
 		fileProposal, err := buildProposalFile(worktree, sourceFile, plans)
 		if err != nil {
 			proposal.Errors = append(proposal.Errors, err.Error())
@@ -106,7 +113,10 @@ func buildProposalFile(worktree, sourceFile string, plans []*PatchPlan) (Proposa
 	if err != nil {
 		return ProposalFile{}, err
 	}
-	path := filepath.Join(worktree, cleaned)
+	path, err := resolveExistingGitPath(worktree, cleaned, "patch plan sourceFile")
+	if err != nil {
+		return ProposalFile{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ProposalFile{}, fmt.Errorf("read proposal source %s: %w", sourceFile, err)
@@ -117,15 +127,38 @@ func buildProposalFile(worktree, sourceFile string, plans []*PatchPlan) (Proposa
 	}
 
 	file := ProposalFile{SourceFile: filepath.ToSlash(cleaned)}
-	for _, plan := range plans {
-		kind, namespace, name := splitPlanResource(plan.Resource)
-		document := findDocumentByIdentity(documents, kind, namespace, name)
-		if document == nil {
-			return ProposalFile{}, fmt.Errorf("resource %s not found while building proposal for %s", plan.Resource, sourceFile)
+	sourceFormat, err := proposalSourceFormat(plans)
+	if err != nil {
+		return ProposalFile{}, fmt.Errorf("build proposal for %s: %w", sourceFile, err)
+	}
+	if sourceFormat == patchSourceHelmValues {
+		if len(documents) != 1 || documents[0].Kind != yaml.MappingNode {
+			return ProposalFile{}, fmt.Errorf("Helm values source %s must contain exactly one non-empty YAML mapping document", sourceFile)
 		}
-		for _, change := range plan.Changes {
-			if applyPatchChange(document, change) {
+		changes, err := mergedHelmPatchChanges(plans)
+		if err != nil {
+			return ProposalFile{}, fmt.Errorf("build proposal for %s: %w", sourceFile, err)
+		}
+		for _, change := range changes {
+			changed, err := applyHelmPatchChange(documents[0], change)
+			if err != nil {
+				return ProposalFile{}, fmt.Errorf("build proposal for %s: %w", sourceFile, err)
+			}
+			if changed {
 				file.Changes = append(file.Changes, change)
+			}
+		}
+	} else {
+		for _, plan := range plans {
+			kind, namespace, name := splitPlanResource(plan.Resource)
+			document := findDocumentByIdentity(documents, kind, namespace, name)
+			if document == nil {
+				return ProposalFile{}, fmt.Errorf("resource %s not found while building proposal for %s", plan.Resource, sourceFile)
+			}
+			for _, change := range plan.Changes {
+				if applyPatchChange(document, change) {
+					file.Changes = append(file.Changes, change)
+				}
 			}
 		}
 	}
@@ -139,6 +172,146 @@ func buildProposalFile(worktree, sourceFile string, plans []*PatchPlan) (Proposa
 	file.ProposedContent = string(rendered)
 	file.Diff = unifiedDiff(file.SourceFile, string(data), file.ProposedContent)
 	return file, nil
+}
+
+func proposalSourceFormat(plans []*PatchPlan) (string, error) {
+	format := patchSourceKubernetesManifest
+	for index, plan := range plans {
+		candidate := plan.SourceFormat
+		if candidate == "" {
+			candidate = patchSourceKubernetesManifest
+		}
+		if candidate != patchSourceKubernetesManifest && candidate != patchSourceHelmValues {
+			return "", fmt.Errorf("unsupported patch source format %q", candidate)
+		}
+		if index == 0 {
+			format = candidate
+			continue
+		}
+		if candidate != format {
+			return "", fmt.Errorf("source file mixes %s and %s patch plans", format, candidate)
+		}
+	}
+	return format, nil
+}
+
+func mergedHelmPatchChanges(plans []*PatchPlan) ([]PatchChange, error) {
+	var changes []PatchChange
+	for _, plan := range plans {
+		for _, change := range plan.Changes {
+			if len(change.SourcePath) == 0 {
+				return nil, fmt.Errorf("Helm values change for %s has no sourcePath", change.Field)
+			}
+			if change.Operation != "replace" {
+				return nil, fmt.Errorf("Helm values change for %s uses unsupported operation %q", change.Field, change.Operation)
+			}
+			if _, err := helmPatchStringValue(change.Field); err != nil {
+				return nil, err
+			}
+			changes = append(changes, change)
+		}
+	}
+	sort.SliceStable(changes, func(left, right int) bool {
+		comparison := compareHelmPaths(changes[left].SourcePath, changes[right].SourcePath)
+		if comparison != 0 {
+			return comparison < 0
+		}
+		return changes[left].Field < changes[right].Field
+	})
+
+	merged := make([]PatchChange, 0, len(changes))
+	for _, change := range changes {
+		duplicate := false
+		for _, existing := range merged {
+			if !helmPathsOverlapAnalyzer(existing.SourcePath, change.SourcePath) {
+				continue
+			}
+			if equalHelmPath(existing.SourcePath, change.SourcePath) && existing.Field == change.Field && existing.Current == change.Current && existing.Recommended == change.Recommended {
+				duplicate = true
+				break
+			}
+			return nil, fmt.Errorf("Helm values source paths %s and %s overlap", formatHelmSourcePath(existing.SourcePath), formatHelmSourcePath(change.SourcePath))
+		}
+		if !duplicate {
+			merged = append(merged, change)
+		}
+	}
+	return merged, nil
+}
+
+func applyHelmPatchChange(document *yaml.Node, change PatchChange) (bool, error) {
+	current, ok, err := helmScalarAt(document, change.SourcePath)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("configured Helm value %s no longer exists", formatHelmSourcePath(change.SourcePath))
+	}
+	if current != change.Current {
+		return false, fmt.Errorf("configured Helm value %s changed after planning: expected %q, found %q", formatHelmSourcePath(change.SourcePath), change.Current, current)
+	}
+	if current == change.Recommended {
+		return false, nil
+	}
+	stringValue, err := helmPatchStringValue(change.Field)
+	if err != nil {
+		return false, err
+	}
+	if err := setHelmScalarAt(document, change.SourcePath, change.Recommended, stringValue); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func helmPatchStringValue(field string) (bool, error) {
+	switch {
+	case field == "spec.replicas":
+		return false, nil
+	case strings.HasSuffix(field, ".resources.requests.cpu"), strings.HasSuffix(field, ".resources.requests.memory"):
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported semantic field %q in Helm values change", field)
+	}
+}
+
+func compareHelmPaths(left, right []string) int {
+	length := len(left)
+	if len(right) < length {
+		length = len(right)
+	}
+	for index := 0; index < length; index++ {
+		if left[index] < right[index] {
+			return -1
+		}
+		if left[index] > right[index] {
+			return 1
+		}
+	}
+	switch {
+	case len(left) < len(right):
+		return -1
+	case len(left) > len(right):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func equalHelmPath(left, right []string) bool {
+	return compareHelmPaths(left, right) == 0
+}
+
+func helmPathsOverlapAnalyzer(left, right []string) bool {
+	shorter := len(left)
+	if len(right) < shorter {
+		shorter = len(right)
+	}
+	for index := 0; index < shorter; index++ {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func applyPatchChange(document *yaml.Node, change PatchChange) bool {
@@ -267,7 +440,12 @@ func writeProposalCommit(ctx context.Context, worktree string, report *Report, p
 	proposal.Branch = branch
 
 	for _, file := range proposal.Files {
-		path := filepath.Join(worktree, filepath.FromSlash(file.SourceFile))
+		path, err := resolveExistingGitPath(worktree, filepath.FromSlash(file.SourceFile), "proposal sourceFile")
+		if err != nil {
+			proposal.Errors = append(proposal.Errors, err.Error())
+			proposal.Blocked = true
+			return
+		}
 		if err := os.WriteFile(path, []byte(file.ProposedContent), 0o644); err != nil {
 			proposal.Errors = append(proposal.Errors, fmt.Sprintf("write proposed manifest %s: %v", file.SourceFile, err))
 			proposal.Blocked = true

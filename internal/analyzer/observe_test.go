@@ -103,6 +103,73 @@ func TestWriteObservationReport(t *testing.T) {
 	}
 }
 
+func TestObserveConvergenceReadsHelmValuesMappings(t *testing.T) {
+	tests := []struct {
+		name   string
+		values string
+		status string
+		want   string
+	}{
+		{
+			name:   "applied with equivalent quantity spelling",
+			values: "replicaCount: 2\nresources:\n  requests:\n    cpu: 0.49\n    memory: 3892Mi\n",
+			status: "applied",
+		},
+		{
+			name:   "drifted",
+			values: "replicaCount: 2\nresources:\n  requests:\n    cpu: 700m\n    memory: 3892Mi\n",
+			status: "drifted",
+		},
+		{
+			name:   "missing mapped value",
+			values: "replicaCount: 2\nresources:\n  requests:\n    cpu: 490m\n",
+			status: "failed",
+			want:   "does not exist",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			worktree := initProposalGitRepo(t)
+			writeRepoFile(t, worktree, "apps/values.yaml", test.values)
+			gitTest(t, worktree, "add", ".")
+			gitTest(t, worktree, "commit", "-m", "initial")
+			profile := helmObservationProfile()
+			report := observationReport("490m", "3892Mi")
+			observation := ObserveConvergence(context.Background(), worktree, "master", profile, report)
+			workload := observation.Workloads[0]
+			if workload.Status != test.status {
+				t.Fatalf("Status = %q, want %q: %#v", workload.Status, test.status, workload)
+			}
+			if test.want != "" && !strings.Contains(strings.Join(workload.Errors, "\n"), test.want) {
+				t.Fatalf("Errors = %#v, want substring %q", workload.Errors, test.want)
+			}
+		})
+	}
+}
+
+func helmObservationProfile() *config.ApplicationProfile {
+	return &config.ApplicationProfile{
+		Metadata: config.Metadata{Name: "shipyard"},
+		Spec: config.ApplicationSpec{
+			Namespace: "shipyardhq",
+			Git:       config.GitSpec{Branch: "master", BasePath: "apps"},
+			Workloads: []config.WorkloadSpec{
+				{
+					Name:       "web",
+					SourceFile: "values.yaml",
+					TargetRef:  config.TargetRef{Kind: "Deployment", Name: "shipyardhq"},
+					HelmValues: &config.HelmValuesSpec{Paths: config.HelmValuePaths{
+						Replicas:      []string{"replicaCount"},
+						CPURequest:    []string{"resources", "requests", "cpu"},
+						MemoryRequest: []string{"resources", "requests", "memory"},
+					}},
+					Scaling: config.ScalingSpec{Replicas: true, CPU: true, Memory: true},
+				},
+			},
+		},
+	}
+}
+
 func initObservationRepo(t *testing.T, cpu, memory string) (string, *config.ApplicationProfile) {
 	t.Helper()
 	worktree := initProposalGitRepo(t)

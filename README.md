@@ -36,6 +36,65 @@ CR profiles place `metricProfiles` under `spec`, unlike the legacy file format w
 
 Controller mode can run the existing GitOps proposal pipeline with `--git-worktree`, `--mode propose`, and the normal proposal flags. Reconciles are intentionally limited to one at a time while profiles share a worktree. This prevents concurrent fetch/commit/push races; keyed per-repository workspaces are the next scaling boundary. Direct Pod recovery still requires both `--availability-recovery`, workload policy opt-in, persisted state, and a namespace-local Pod-delete Role.
 
+## Git Source Mappings
+
+`sourceFile` normally points to a Kubernetes manifest containing the target `Deployment`. For a Helm-managed Deployment, point it at the effective values file and add `helmValues.paths`. Each path is an ordered list of YAML mapping keys, so chart-specific names and keys containing dots or hyphens remain unambiguous.
+
+Two Deployments can safely share one values file when they own disjoint paths:
+
+```yaml
+spec:
+  namespace: zitadel
+  git:
+    provider: github
+    mode: fleet
+    repository: https://github.com/example/home-lab.git
+    branch: master
+    basePath: kubernetes/apps/zitadel
+  workloads:
+    - name: server
+      targetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: zitadel
+      sourceFile: values.yaml
+      helmValues:
+        paths:
+          replicas: [replicaCount]
+          cpuRequest: [resources, requests, cpu]
+          memoryRequest: [resources, requests, memory]
+      metricProfileRef: resource-only
+      scaling:
+        replicas: true
+        cpu: true
+        memory: true
+
+    - name: login
+      targetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: zitadel-login
+      sourceFile: values.yaml
+      helmValues:
+        paths:
+          replicas: [login, replicaCount]
+          cpuRequest: [login, resources, requests, cpu]
+          memoryRequest: [login, resources, requests, memory]
+      metricProfileRef: resource-only
+      scaling:
+        replicas: true
+        cpu: true
+        memory: true
+```
+
+The semantic fields remain Deployment replicas and container requests; the paths only describe where those fields live in Git. Patch planning requires every mapped leaf to already exist as a scalar and to match the live Deployment baseline. It compares Kubernetes quantities semantically, so values such as `0.5` and `500m` are equivalent. Missing keys, YAML aliases/merges, source drift, overlapping ownership, mixed manifest/Helm mappings, and concurrent edits block the proposal instead of creating or overwriting a value.
+
+The controller exposes the bounded result under `status.workloads[*].patch`. Mapping and source errors mark that workload blocked and set the profile's `Degraded` condition while leaving the full diff out of the CR status.
+
+The values file must be the effective highest-precedence Helm input. A later `valuesFrom`, `--set`, or inline override can prevent Git and the live Deployment from converging. Keep one `ApplicationProfile` owner per Git scalar; ownership cannot currently be coordinated across separate profile resources.
+
+Initial Helm support intentionally covers one mapping-only YAML document with existing scalar leaves. Structured encoding preserves keys and comments but can normalize blank lines or indentation on the first proposal; the displayed plan diff uses the raw source so that formatting churn is visible before a commit. Sequence traversal, embedded `HelmChart.spec.valuesContent`, chart-specific transforms, StatefulSet targets, and multi-container resource selection remain out of scope.
+
 Run the controller lifecycle test against an envtest API server:
 
 ```bash

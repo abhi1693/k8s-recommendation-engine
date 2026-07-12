@@ -1,0 +1,2 @@
+resources:
+  - bases/k8s-recommendation-engine.io_applicationprofiles.yaml

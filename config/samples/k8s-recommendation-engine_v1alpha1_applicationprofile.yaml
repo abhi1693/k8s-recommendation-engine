@@ -1,0 +1,40 @@
+apiVersion: k8s-recommendation-engine.io/v1alpha1
+kind: ApplicationProfile
+metadata:
+  name: example
+  namespace: k8s-recommendation-engine-system
+spec:
+  namespace: default
+  reconcileInterval: 5m
+  suspend: true
+  workloads:
+    - name: example
+      targetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: example
+      metricProfileRef: resources
+      scaling:
+        replicas: true
+        cpu: true
+        memory: true
+      bounds:
+        replicas:
+          min: 1
+          max: 4
+  metricProfiles:
+    resources:
+      description: Basic Deployment resource metrics.
+      signals:
+        cpu_usage:
+          required: true
+          query: |
+            sum(rate(container_cpu_usage_seconds_total{namespace="{{ .namespace }}",container!="",image!=""}[5m]))
+        memory_working_set:
+          required: true
+          query: |
+            sum(container_memory_working_set_bytes{namespace="{{ .namespace }}",container!="",image!=""})
+        available_replicas:
+          required: true
+          query: |
+            kube_deployment_status_replicas_available{namespace="{{ .namespace }}",deployment="{{ .deployment }}"}

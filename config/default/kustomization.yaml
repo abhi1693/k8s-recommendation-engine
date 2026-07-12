@@ -1,0 +1,6 @@
+namespace: k8s-recommendation-engine-system
+namePrefix: k8s-recommendation-engine-
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager

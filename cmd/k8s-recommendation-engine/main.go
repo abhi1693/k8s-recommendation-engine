@@ -40,6 +40,8 @@ func run() error {
 		return runAnalyze(os.Args[2:])
 	case "run":
 		return runContinuous(os.Args[2:])
+	case "controller":
+		return runController(os.Args[2:])
 	case "backtest":
 		return runBacktest(os.Args[2:])
 	case "proposal":
@@ -571,6 +573,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine analyze [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine run [flags]")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine controller [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine backtest [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal status [flags]")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal diff [flags]")
@@ -598,6 +601,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal auto-rollback --config configs/shipyard-profile.yaml --state-db .state/k8s-recommendation-engine.db --git-worktree /path/to/fleet --branch master --push --allow-default-branch-push")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine proposal batch status --state-db .state/k8s-recommendation-engine.db --proposal-batch-window 15m")
 	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine run --interval 5m --state-db .state/k8s-recommendation-engine.db --output summary")
+	fmt.Fprintln(os.Stderr, "  k8s-recommendation-engine controller --watch-namespace cluster-ops --prometheus-url http://127.0.0.1:9090")
 }
 
 func attachProposal(ctx context.Context, options *commandOptions, profile *config.ApplicationProfile, report *analyzer.Report) error {

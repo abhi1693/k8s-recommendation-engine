@@ -1,5 +1,8 @@
 .state/
 .k8s-recommendation-engine/
+/bin/
+/cover.out
+/dist/
 /k8s-recommendation-engine
 configs/*profile*.yaml
 deploy/*/*profile*.yaml

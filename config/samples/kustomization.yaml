@@ -1,0 +1,2 @@
+resources:
+  - k8s-recommendation-engine_v1alpha1_applicationprofile.yaml

@@ -4,6 +4,44 @@ Shipyard-first Kubernetes/K3s recommendation engine for predictive scaling throu
 
 The default analysis path is read-only. Proposal mode can write gated changes through GitOps, and the separately gated availability-recovery mode can recreate a failed Pod directly; it never patches live workload resources.
 
+## Kubernetes Controller
+
+The production controller uses [Kubebuilder](https://book.kubebuilder.io/) project scaffolding and [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime). One manager watches any number of namespaced `ApplicationProfile` custom resources and gives each profile an independent work-queue item, retry history, reconcile interval, timeout, status, and failure boundary.
+
+Generate the API code and manifests:
+
+```bash
+make manifests generate
+```
+
+Install the CRD and run the controller against the current kubeconfig:
+
+```bash
+make install
+go run ./cmd/k8s-recommendation-engine controller \
+  --watch-namespace k8s-recommendation-engine-system \
+  --prometheus-url http://127.0.0.1:9090 \
+  --state-db .state/controller.db
+```
+
+Create a profile and inspect its bounded status summary:
+
+```bash
+kubectl apply -f config/samples/k8s-recommendation-engine_v1alpha1_applicationprofile.yaml
+kubectl get applicationprofiles -A
+kubectl get applicationprofile -n k8s-recommendation-engine-system example -o yaml
+```
+
+CR profiles place `metricProfiles` under `spec`, unlike the legacy file format where it is a top-level field. `spec.suspend: true` stops one profile without stopping the manager. `spec.reconcileInterval` overrides the controller default for that profile. Persisted state is keyed by `namespace/name`; `spec.stateKey` exists only to preserve a legacy profile's prior SQLite history during migration.
+
+Controller mode can run the existing GitOps proposal pipeline with `--git-worktree`, `--mode propose`, and the normal proposal flags. Reconciles are intentionally limited to one at a time while profiles share a worktree. This prevents concurrent fetch/commit/push races; keyed per-repository workspaces are the next scaling boundary. Direct Pod recovery still requires both `--availability-recovery`, workload policy opt-in, persisted state, and a namespace-local Pod-delete Role.
+
+Run the controller lifecycle test against an envtest API server:
+
+```bash
+make test-integration
+```
+
 ## Analyze Shipyard
 
 Port-forward Prometheus:

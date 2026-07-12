@@ -34,6 +34,14 @@ func NewClient(kubeconfigPath, contextName string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewClientForConfig(restConfig)
+}
+
+func NewClientForConfig(restConfig *rest.Config) (*Client, error) {
+	if restConfig == nil {
+		return nil, fmt.Errorf("kubernetes REST config is required")
+	}
+	restConfig = rest.CopyConfig(restConfig)
 	restConfig.QPS = 50
 	restConfig.Burst = 100
 	clientset, err := kubernetes.NewForConfig(restConfig)

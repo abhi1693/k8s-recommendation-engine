@@ -20,7 +20,6 @@ jobs:
       context: .
       file: Dockerfile
       platforms: linux/arm64
-      qemu: false
       cache-scope: k8s-recommendation-engine
       tags: |
         type=semver,pattern={{version}}

@@ -25,9 +25,13 @@ func runController(args []string) error {
 	var metricsAddress string
 	var healthAddress string
 	var leaderElect bool
+	var leaderElectionLeaseDuration time.Duration
+	var leaderElectionRenewDeadline time.Duration
+	var leaderElectionRetryPeriod time.Duration
 	var watchNamespace string
 	var prometheusURL string
 	var stateDB string
+	var stateRetention time.Duration
 	var historyWindow time.Duration
 	var historyStep time.Duration
 	var reconcileInterval time.Duration
@@ -46,13 +50,17 @@ func runController(args []string) error {
 	fs.StringVar(&metricsAddress, "metrics-bind-address", ":8080", "address for controller-runtime metrics; set 0 to disable")
 	fs.StringVar(&healthAddress, "health-probe-bind-address", ":8081", "address for liveness and readiness probes")
 	fs.BoolVar(&leaderElect, "leader-elect", false, "use a Lease so only one controller instance reconciles profiles")
+	fs.DurationVar(&leaderElectionLeaseDuration, "leader-election-lease-duration", 30*time.Second, "leader-election lease duration")
+	fs.DurationVar(&leaderElectionRenewDeadline, "leader-election-renew-deadline", 20*time.Second, "leader-election lease renewal deadline")
+	fs.DurationVar(&leaderElectionRetryPeriod, "leader-election-retry-period", 5*time.Second, "leader-election retry period")
 	fs.StringVar(&watchNamespace, "watch-namespace", "", "namespace containing ApplicationProfile resources; empty watches all namespaces")
 	fs.StringVar(&prometheusURL, "prometheus-url", "http://127.0.0.1:9090", "Prometheus base URL shared by profiles")
 	fs.StringVar(&stateDB, "state-db", "", "SQLite state database shared by profiles")
+	fs.DurationVar(&stateRetention, "state-retention", 14*24*time.Hour, "retention for persisted learning and operational history")
 	fs.DurationVar(&historyWindow, "history-window", 24*time.Hour, "Prometheus history window used by profile analysis")
 	fs.DurationVar(&historyStep, "history-step", 5*time.Minute, "Prometheus query_range step used by profile analysis")
 	fs.DurationVar(&reconcileInterval, "reconcile-interval", 5*time.Minute, "default interval between reconciliations of each profile")
-	fs.DurationVar(&reconcileTimeout, "reconcile-timeout", 2*time.Minute, "maximum analysis time for one profile reconciliation")
+	fs.DurationVar(&reconcileTimeout, "reconcile-timeout", 5*time.Minute, "maximum analysis time for one profile reconciliation")
 	fs.BoolVar(&availabilityRecovery, "availability-recovery", false, "allow policy-enabled failed Pods to be recreated directly")
 	fs.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1, "maximum profiles reconciled concurrently")
 	fs.StringVar(&mode, "mode", "dry-run", "operation mode shared by profiles: dry-run or propose")
@@ -69,8 +77,8 @@ func runController(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if historyWindow <= 0 || historyStep <= 0 || reconcileInterval <= 0 || reconcileTimeout <= 0 {
-		return fmt.Errorf("history-window, history-step, reconcile-interval, and reconcile-timeout must be greater than zero")
+	if historyWindow <= 0 || historyStep <= 0 || reconcileInterval <= 0 || reconcileTimeout <= 0 || stateRetention <= 0 {
+		return fmt.Errorf("history-window, history-step, reconcile-interval, reconcile-timeout, and state-retention must be greater than zero")
 	}
 	if maxConcurrentReconciles <= 0 {
 		return fmt.Errorf("max-concurrent-reconciles must be greater than zero")
@@ -89,6 +97,9 @@ func runController(args []string) error {
 	}
 	if availabilityRecovery && stateDB == "" {
 		return fmt.Errorf("availability-recovery requires --state-db")
+	}
+	if leaderElectionLeaseDuration <= leaderElectionRenewDeadline || leaderElectionRenewDeadline <= leaderElectionRetryPeriod || leaderElectionRetryPeriod <= 0 {
+		return fmt.Errorf("leader-election durations must satisfy lease-duration > renew-deadline > retry-period > 0")
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOptions)))
@@ -116,6 +127,9 @@ func runController(args []string) error {
 		LeaderElection:                leaderElect,
 		LeaderElectionID:              "k8s-recommendation-engine-controller",
 		LeaderElectionReleaseOnCancel: true,
+		LeaseDuration:                 &leaderElectionLeaseDuration,
+		RenewDeadline:                 &leaderElectionRenewDeadline,
+		RetryPeriod:                   &leaderElectionRetryPeriod,
 	})
 	if err != nil {
 		return fmt.Errorf("create controller manager: %w", err)
@@ -124,6 +138,7 @@ func runController(args []string) error {
 		Kube:                   kubeClient,
 		Prometheus:             prom.NewClient(prometheusURL, nil),
 		StateDB:                stateDB,
+		StateRetention:         stateRetention,
 		HistoryWindow:          historyWindow,
 		HistoryStep:            historyStep,
 		AvailabilityRecovery:   availabilityRecovery,
@@ -158,6 +173,9 @@ func runController(args []string) error {
 	ctrl.Log.WithName("setup").Info("starting ApplicationProfile controller",
 		"watchNamespace", watchNamespace,
 		"reconcileInterval", reconcileInterval,
+		"reconcileTimeout", reconcileTimeout,
+		"stateRetention", stateRetention,
+		"leaderElection", leaderElect,
 		"maxConcurrentReconciles", maxConcurrentReconciles,
 	)
 	if err := manager.Start(ctrl.SetupSignalHandler()); err != nil {

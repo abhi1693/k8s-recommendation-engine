@@ -373,11 +373,25 @@ func (s *Store) ApplyProposalBatch(ctx context.Context, report *analyzer.Report,
 			}
 			continue
 		}
+		if recommendationHasChange(workload.Recommendation) {
+			// A safety, confidence, rollout, or outcome gate can temporarily make
+			// the patch plan non-applyable. Preserve an existing batch timer so
+			// the same recommendation does not restart its window after the gate
+			// clears. A changed applyable plan is still detected and reset by
+			// upsertProposalBatchItem.
+			continue
+		}
 		if err := s.deleteProposalBatchItem(ctx, report.Application, workload.Namespace, workload.Name); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func recommendationHasChange(recommendation analyzer.Recommendation) bool {
+	return recommendation.CurrentReplicas != recommendation.RecommendedReplicas ||
+		recommendation.CurrentCPURequest != recommendation.RecommendedCPURequest ||
+		recommendation.CurrentMemoryRequest != recommendation.RecommendedMemoryRequest
 }
 
 func workloadPolicies(profile *config.ApplicationProfile) map[string]config.PolicySpec {

@@ -284,3 +284,37 @@ func TestSafetyPolicyMaxDecreaseRiskBlocksLargerDecrease(t *testing.T) {
 		t.Fatal("Recommendation.Blocked = false, want true")
 	}
 }
+
+func TestSafetyDoesNotBlockNoChangeRecommendation(t *testing.T) {
+	report := &Report{Workloads: []WorkloadReport{{
+		Name:             "web",
+		Namespace:        "shipyardhq",
+		Deployment:       "shipyardhq",
+		Replicas:         1,
+		ReadyReplicas:    0,
+		MetricsCondition: "unhealthy",
+		Recommendation: Recommendation{
+			CurrentReplicas:          1,
+			RecommendedReplicas:      1,
+			CurrentCPURequest:        "100m",
+			RecommendedCPURequest:    "100m",
+			CurrentMemoryRequest:     "128Mi",
+			RecommendedMemoryRequest: "128Mi",
+			Blocked:                  true,
+			BlockReasons:             []string{"confidence 0.70 below minAutoCommit 0.85 blocks auto-commit"},
+			ReasonCodes:              []string{"confidence_below_min_auto_commit"},
+		},
+	}}}
+
+	AttachSafetyAssessmentsWithPolicy(report, nil)
+	recommendation := report.Workloads[0].Recommendation
+	if recommendation.Safety.Classification != SafetyHighRisk {
+		t.Fatalf("Safety.Classification = %q, want high_risk", recommendation.Safety.Classification)
+	}
+	if recommendation.Blocked || len(recommendation.BlockReasons) != 0 {
+		t.Fatalf("no-change recommendation remained blocked: %#v", recommendation)
+	}
+	if stringSliceContains(recommendation.ReasonCodes, "confidence_below_min_auto_commit") || stringSliceContains(recommendation.ReasonCodes, "safety_high_risk_auto_commit_blocked") {
+		t.Fatalf("stale auto-commit reason codes = %#v", recommendation.ReasonCodes)
+	}
+}

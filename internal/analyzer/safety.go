@@ -28,6 +28,10 @@ func AttachSafetyAssessmentsWithPolicy(report *Report, profile *config.Applicati
 		workload.Recommendation.Safety = classifyRecommendationSafety(*workload, report.SharedSignals)
 		policy := policies[workload.Name]
 		applySafetyPolicy(workload, policy)
+		if !recommendationHasChange(workload.Recommendation) {
+			clearNoChangeAutoCommitBlocks(&workload.Recommendation)
+			continue
+		}
 		if !workload.Recommendation.Safety.AutoCommitAllowed {
 			reason := safetyBlockReason(workload.Recommendation.Safety)
 			workload.Recommendation.Blocked = true
@@ -43,6 +47,31 @@ func AttachSafetyAssessmentsWithPolicy(report *Report, profile *config.Applicati
 			}
 		}
 	}
+}
+
+func clearNoChangeAutoCommitBlocks(recommendation *Recommendation) {
+	if recommendation == nil {
+		return
+	}
+	blockReasons := recommendation.BlockReasons[:0]
+	for _, reason := range recommendation.BlockReasons {
+		if strings.HasPrefix(reason, "confidence ") || strings.HasPrefix(reason, "safety classification ") || strings.HasPrefix(reason, "safety policy blocks auto-commit") {
+			continue
+		}
+		blockReasons = append(blockReasons, reason)
+	}
+	recommendation.BlockReasons = blockReasons
+	reasonCodes := recommendation.ReasonCodes[:0]
+	for _, code := range recommendation.ReasonCodes {
+		switch code {
+		case "confidence_below_min_auto_commit", "safety_auto_commit_blocked", "safety_high_risk_auto_commit_blocked":
+			continue
+		default:
+			reasonCodes = append(reasonCodes, code)
+		}
+	}
+	recommendation.ReasonCodes = reasonCodes
+	recommendation.Blocked = len(recommendation.BlockReasons) > 0
 }
 
 func classifyRecommendationSafety(workload WorkloadReport, sharedSignals []SignalReport) SafetyAssessment {

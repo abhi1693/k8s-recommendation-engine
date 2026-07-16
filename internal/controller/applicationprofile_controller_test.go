@@ -64,6 +64,39 @@ func TestReconcileProcessesProfileAndUpdatesStatus(t *testing.T) {
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != "Reconciled" {
 		t.Fatalf("Ready condition = %#v", ready)
 	}
+	proposalReady := apiMeta.FindStatusCondition(updated.Status.Conditions, ConditionProposalReady)
+	if proposalReady == nil || proposalReady.Status != metav1.ConditionTrue || proposalReady.Reason != "ProposalReady" {
+		t.Fatalf("ProposalReady condition = %#v", proposalReady)
+	}
+}
+
+func TestReconcileReportsBlockedProposalSeparatelyFromWorkloadHealth(t *testing.T) {
+	resource := validProfileResource()
+	report := healthyReport()
+	report.Proposal = &analyzer.ProposalReport{
+		Mode:         "propose",
+		Kind:         "commit",
+		Blocked:      true,
+		BlockReasons: []string{"proposal batch window open"},
+	}
+	processor := &fakeProcessor{report: report}
+	reconciler, kubeClient := testReconciler(t, resource, processor)
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(resource)}); err != nil {
+		t.Fatal(err)
+	}
+	updated := getProfile(t, kubeClient, resource)
+	ready := apiMeta.FindStatusCondition(updated.Status.Conditions, ConditionReady)
+	proposalReady := apiMeta.FindStatusCondition(updated.Status.Conditions, ConditionProposalReady)
+	degraded := apiMeta.FindStatusCondition(updated.Status.Conditions, ConditionDegraded)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready condition = %#v, want successful reconciliation", ready)
+	}
+	if proposalReady == nil || proposalReady.Status != metav1.ConditionFalse || proposalReady.Reason != "ProposalBlocked" {
+		t.Fatalf("ProposalReady condition = %#v, want blocked proposal", proposalReady)
+	}
+	if degraded == nil || degraded.Status != metav1.ConditionFalse {
+		t.Fatalf("Degraded condition = %#v, workload should remain healthy", degraded)
+	}
 }
 
 func TestProfileConfigUsesExplicitMigrationStateKey(t *testing.T) {

@@ -544,6 +544,15 @@ func publishExistingProposalCommit(ctx context.Context, worktree string, proposa
 			return
 		}
 	}
+	ahead, behind, syncErr := gitAheadBehind(ctx, worktree, branch, strings.TrimSpace(options.Remote))
+	if strings.TrimSpace(options.Remote) == "" {
+		ahead, behind, syncErr = gitAheadBehind(ctx, worktree, branch, "origin")
+	}
+	if syncErr == nil && ahead == 0 && behind == 0 {
+		proposal.Branch = branch
+		proposal.Message = "no proposal changes and branch is synchronized with the remote"
+		return
+	}
 	subject, err := gitOutput(ctx, worktree, "log", "-1", "--format=%s")
 	if err != nil {
 		proposal.Errors = append(proposal.Errors, "read latest commit subject: "+err.Error())

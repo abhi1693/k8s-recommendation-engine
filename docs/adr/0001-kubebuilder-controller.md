@@ -18,9 +18,9 @@ Use Kubebuilder v4 scaffolding with controller-runtime for a namespaced `Applica
 - Each profile is reconciled independently and returns `RequeueAfter` for Prometheus polling.
 - Generation-change predicates prevent status updates from creating reconcile loops.
 - Errors return to controller-runtime for rate-limited retries; invalid specs wait for a new generation.
-- The status subresource stores conditions and bounded workload/proposal summaries, not complete metric history.
+- The status subresource stores independent `Ready`, `ProposalReady`, `Degraded`, and `Suspended` conditions plus bounded workload/proposal summaries, not complete metric history.
 - Persisted learning state defaults to a collision-safe `namespace/name` identity, with an explicit migration override for legacy profile keys.
-- Leader election permits multiple manager replicas while keeping one active reconciler.
+- Leader election is optional for the single-replica deployment and permits multiple manager replicas while keeping one active reconciler when enabled; configurable lease timings tolerate brief API-server interruptions.
 - Existing analysis, SQLite state, GitOps proposal, and failed-Pod recovery logic is invoked through a processor adapter.
 - A shared Git worktree forces `max-concurrent-reconciles=1` until repository-keyed workspace and lock management is implemented.
 - Pod deletion is not granted by the generated ClusterRole. Availability recovery continues to require an explicit RoleBinding in each target namespace.
@@ -34,5 +34,6 @@ Operator SDK was not selected because its Go projects use Kubebuilder/controller
 - File-based `analyze`, `run`, and `backtest` commands remain available during migration.
 - CR metric profiles move under `spec.metricProfiles`; the legacy file loader remains unchanged.
 - The first controller release supports multiple profiles sharing one Prometheus endpoint, state database, and optionally one serialized Git worktree.
+- Controller state has bounded retention, and proposal outcomes are persisted only after delivery is known so unpushed recommendations cannot feed the `not_applied` safety gate.
 - A later change must add repository-keyed clone caches and locks before allowing concurrent Git reconciliation across repositories.
 - Secondary Deployment and Pod watches can be added later for faster event-driven recovery; periodic reconciliation remains the correctness fallback.

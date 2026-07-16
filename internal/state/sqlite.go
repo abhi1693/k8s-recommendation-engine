@@ -61,6 +61,56 @@ func AttachAndRecord(ctx context.Context, path string, report *analyzer.Report) 
 	return store.AttachAndRecord(ctx, report)
 }
 
+// Attach loads prior learning into report without persisting the current run.
+// Propose-mode callers should use Attach before proposal planning and Record
+// after proposal delivery so unpushed recommendations are not classified as
+// changes that should already have been applied.
+func Attach(ctx context.Context, path string, report *analyzer.Report) error {
+	if path == "" {
+		return nil
+	}
+	store, err := Open(path)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.Attach(ctx, report)
+}
+
+// Record persists a report after its proposal outcome is known.
+func Record(ctx context.Context, path string, report *analyzer.Report) error {
+	if path == "" {
+		return nil
+	}
+	store, err := Open(path)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.Record(ctx, report)
+}
+
+// RecordAndPrune persists a report and performs rate-limited retention
+// maintenance using the same database connection.
+func RecordAndPrune(ctx context.Context, path string, report *analyzer.Report, retention time.Duration) error {
+	if path == "" {
+		return nil
+	}
+	store, err := Open(path)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.Record(ctx, report); err != nil {
+		return err
+	}
+	now := time.Time{}
+	if report != nil {
+		now = report.GeneratedAt
+	}
+	return store.PruneExpired(ctx, retention, now)
+}
+
 func RecordObservation(ctx context.Context, path string, report *analyzer.ObservationReport) error {
 	if path == "" || report == nil {
 		return nil
@@ -74,6 +124,13 @@ func RecordObservation(ctx context.Context, path string, report *analyzer.Observ
 }
 
 func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) error {
+	if err := s.Attach(ctx, report); err != nil {
+		return err
+	}
+	return s.Record(ctx, report)
+}
+
+func (s *Store) Attach(ctx context.Context, report *analyzer.Report) error {
 	for index := range report.Workloads {
 		workload := &report.Workloads[index]
 		summary, err := s.summary(ctx, report.Application, report.GeneratedAt, workload)
@@ -102,7 +159,25 @@ func (s *Store) AttachAndRecord(ctx context.Context, report *analyzer.Report) er
 		applyOutcomeSafetyGate(workload.Recommendation.Stability, summary.LastOutcome, workload.Recommendation.Mode)
 		applyRecentOutcomeCooldownGate(workload.Recommendation.Stability, recentRuns, workload.Recommendation.Mode)
 		applyAvailabilityRecoveryStabilityGate(workload)
-		if err := s.recordWorkload(ctx, report.Application, report.GeneratedAt, workload, currentForecastScores); err != nil {
+	}
+	return nil
+}
+
+func (s *Store) Record(ctx context.Context, report *analyzer.Report) error {
+	if report == nil {
+		return nil
+	}
+	for index := range report.Workloads {
+		workload := &report.Workloads[index]
+		recentRuns, err := s.recentRuns(ctx, report.Application, workload.Namespace, workload.Name, 1)
+		if err != nil {
+			return err
+		}
+		var currentForecastScores []forecastScore
+		if len(recentRuns) > 0 {
+			currentForecastScores = scoreForecastAccuracy(recentRuns[0], workload)
+		}
+		if err := s.recordWorkload(ctx, report.Application, report.GeneratedAt, workload, currentForecastScores, report.Proposal); err != nil {
 			return err
 		}
 	}
@@ -268,6 +343,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			ON seasonal_signal_observations(application, namespace, workload_name, signal, day_type, hour_of_day);`,
 		`CREATE INDEX IF NOT EXISTS idx_seasonal_latency_band_lookup
 			ON seasonal_signal_observations(application, namespace, workload_name, signal, traffic_band, day_type, hour_of_day);`,
+		`CREATE TABLE IF NOT EXISTS state_maintenance (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -1376,7 +1455,7 @@ func hasReasonPrefix(reasons []string, prefix string) bool {
 	return false
 }
 
-func (s *Store) recordWorkload(ctx context.Context, application string, generatedAt time.Time, workload *analyzer.WorkloadReport, scores []forecastScore) error {
+func (s *Store) recordWorkload(ctx context.Context, application string, generatedAt time.Time, workload *analyzer.WorkloadReport, scores []forecastScore, proposal *analyzer.ProposalReport) error {
 	reasons, err := json.Marshal(workload.Recommendation.ReasonCodes)
 	if err != nil {
 		return fmt.Errorf("encode reason codes: %w", err)
@@ -1424,11 +1503,11 @@ func (s *Store) recordWorkload(ctx context.Context, application string, generate
 		workload.Recommendation.Confidence,
 		boolInt(workload.Recommendation.Blocked),
 		workload.Recommendation.Mode,
-		boolInt(recommendationActionable(workload.Recommendation)),
+		boolInt(recommendationOutcomeEligible(workload, proposal)),
 		recommendationOutcomeStatus(workload.Recommendation),
-		boolInt(replicasActionable(workload.Recommendation)),
-		boolInt(cpuActionable(workload.Recommendation)),
-		boolInt(memoryActionable(workload.Recommendation)),
+		boolInt(replicasOutcomeEligible(workload, proposal)),
+		boolInt(cpuOutcomeEligible(workload, proposal)),
+		boolInt(memoryOutcomeEligible(workload, proposal)),
 		string(reasons),
 	)
 	if err != nil {
@@ -1529,8 +1608,11 @@ func boolInt(value bool) int {
 	return 0
 }
 
-func recommendationActionable(recommendation analyzer.Recommendation) bool {
-	return recommendation.Stability != nil && recommendation.Stability.Actionable
+func recommendationOutcomeEligible(workload *analyzer.WorkloadReport, proposal *analyzer.ProposalReport) bool {
+	return workload != nil &&
+		workload.Recommendation.Stability != nil &&
+		workload.Recommendation.Stability.Actionable &&
+		recommendationDelivered(workload, proposal)
 }
 
 func recommendationOutcomeStatus(recommendation analyzer.Recommendation) string {
@@ -1540,15 +1622,25 @@ func recommendationOutcomeStatus(recommendation analyzer.Recommendation) string 
 	return recommendation.Learning.Persistent.LastOutcome.Status
 }
 
-func replicasActionable(recommendation analyzer.Recommendation) bool {
-	return recommendation.Stability != nil &&
+func replicasOutcomeEligible(workload *analyzer.WorkloadReport, proposal *analyzer.ProposalReport) bool {
+	if workload == nil {
+		return false
+	}
+	recommendation := workload.Recommendation
+	return recommendationDelivered(workload, proposal) &&
+		recommendation.Stability != nil &&
 		!recommendation.Blocked &&
 		recommendation.CurrentReplicas != recommendation.RecommendedReplicas &&
 		gateActionable(recommendation.Stability.Replicas)
 }
 
-func cpuActionable(recommendation analyzer.Recommendation) bool {
-	return recommendation.Stability != nil &&
+func cpuOutcomeEligible(workload *analyzer.WorkloadReport, proposal *analyzer.ProposalReport) bool {
+	if workload == nil {
+		return false
+	}
+	recommendation := workload.Recommendation
+	return recommendationDelivered(workload, proposal) &&
+		recommendation.Stability != nil &&
 		!recommendation.Blocked &&
 		recommendation.CurrentCPURequest != "" &&
 		recommendation.RecommendedCPURequest != "" &&
@@ -1556,13 +1648,29 @@ func cpuActionable(recommendation analyzer.Recommendation) bool {
 		gateActionable(recommendation.Stability.CPU)
 }
 
-func memoryActionable(recommendation analyzer.Recommendation) bool {
-	return recommendation.Stability != nil &&
+func memoryOutcomeEligible(workload *analyzer.WorkloadReport, proposal *analyzer.ProposalReport) bool {
+	if workload == nil {
+		return false
+	}
+	recommendation := workload.Recommendation
+	return recommendationDelivered(workload, proposal) &&
+		recommendation.Stability != nil &&
 		!recommendation.Blocked &&
 		recommendation.CurrentMemoryRequest != "" &&
 		recommendation.RecommendedMemoryRequest != "" &&
 		recommendation.CurrentMemoryRequest != recommendation.RecommendedMemoryRequest &&
 		gateActionable(recommendation.Stability.Memory)
+}
+
+func recommendationDelivered(workload *analyzer.WorkloadReport, proposal *analyzer.ProposalReport) bool {
+	if workload == nil {
+		return false
+	}
+	if workload.Recommendation.Mode == "" || workload.Recommendation.Mode == "dry-run" {
+		return true
+	}
+	plan := workload.Recommendation.PatchPlan
+	return proposal != nil && proposal.Pushed && plan != nil && plan.Needed && !plan.Blocked && len(plan.Errors) == 0 && len(plan.Changes) > 0
 }
 
 func sqlFinite(value float64) float64 {

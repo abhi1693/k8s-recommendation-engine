@@ -371,6 +371,7 @@ type GitStatus struct {
 // +kubebuilder:resource:shortName=aprof,categories=k8s-recommendation-engine
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.namespace`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Proposal",type=string,JSONPath=`.status.conditions[?(@.type=="ProposalReady")].status`
 // +kubebuilder:printcolumn:name="Healthy",type=integer,JSONPath=`.status.summary.healthy`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

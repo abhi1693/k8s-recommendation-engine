@@ -21,7 +21,9 @@ make install
 go run ./cmd/k8s-recommendation-engine controller \
   --watch-namespace k8s-recommendation-engine-system \
   --prometheus-url http://127.0.0.1:9090 \
-  --state-db .state/controller.db
+  --state-db .state/controller.db \
+  --state-retention 336h \
+  --reconcile-timeout 5m
 ```
 
 Create a profile and inspect its bounded status summary:
@@ -34,7 +36,11 @@ kubectl get applicationprofile -n k8s-recommendation-engine-system example -o ya
 
 CR profiles place `metricProfiles` under `spec`, unlike the legacy file format where it is a top-level field. `spec.suspend: true` stops one profile without stopping the manager. `spec.reconcileInterval` overrides the controller default for that profile. Persisted state is keyed by `namespace/name`; `spec.stateKey` exists only to preserve a legacy profile's prior SQLite history during migration.
 
+`Ready` reports whether the latest reconciliation completed, while `ProposalReady` independently reports whether the Git proposal path is ready, waiting, or blocked. This keeps an intentional safety or batch hold from making a healthy workload look degraded. `kubectl get applicationprofiles` displays both conditions.
+
 Controller mode can run the existing GitOps proposal pipeline with `--git-worktree`, `--mode propose`, and the normal proposal flags. Reconciles are intentionally limited to one at a time while profiles share a worktree. This prevents concurrent fetch/commit/push races; keyed per-repository workspaces are the next scaling boundary. Direct Pod recovery still requires both `--availability-recovery`, workload policy opt-in, persisted state, and a namespace-local Pod-delete Role.
+
+Leader election is disabled by default and is unnecessary for the supplied single-replica `Recreate` Deployment. Multi-replica installations can enable `--leader-elect`; the default lease timings are a 30-second lease, 20-second renewal deadline, and 5-second retry period, and each value has a corresponding `--leader-election-*` flag.
 
 ## Git Source Mappings
 
@@ -140,6 +146,8 @@ go run ./cmd/k8s-recommendation-engine analyze \
 
 The first run creates the SQLite state database and records the current learned envelopes. Later runs show prior persisted recommendation and signal counts in each workload's learning section.
 When `--state-db` is enabled, later runs also evaluate the latest prior recommendation and show `LAST OUTCOME` in summary output.
+
+Persisted learning and operational rows are retained for 14 days by default and pruned at most once per hour. Override this with `--state-retention`; size the PVC for the workload count, reconcile cadence, and selected retention. Pruning makes SQLite reuse freed pages but does not shrink an existing file. To reclaim disk from a database that grew before retention was enabled, stop every writer, back up the file, run an offline `VACUUM`, and then restart the controller.
 
 ## Forecast Horizons
 
@@ -255,7 +263,7 @@ policy:
     minAutoCommit: 0.75
 ```
 
-Proposal commits are grouped by default. When `--mode propose --proposal-kind commit` is used, stable applyable recommendations are first stored in SQLite and only become commit-eligible after the proposal batch window elapses. The default window is `15m`, which reduces one-commit-per-reconcile noise and lets multiple workload changes land in one reviewable Git commit.
+Proposal commits are grouped by default. When `--mode propose --proposal-kind commit` is used, stable applyable patch plans are stored in the SQLite batch queue and only become commit-eligible after the proposal batch window elapses. The current recommendation run is recorded after proposal delivery is known, so a batch-, safety-, or Git-blocked recommendation is never mistaken for a pushed change that should already be live. The default window is `15m`, which reduces one-commit-per-reconcile noise and lets multiple workload changes land in one reviewable Git commit.
 
 ```bash
 go run ./cmd/k8s-recommendation-engine run \
@@ -275,7 +283,7 @@ go run ./cmd/k8s-recommendation-engine proposal batch status \
   --proposal-batch-window 15m
 ```
 
-The status output shows each pending workload, first seen time, ready time, remaining wait, change count, and why the item is still waiting. Use `--output json` for automation.
+The status output shows each pending workload, first seen time, ready time, remaining wait, change count, and why the item is still waiting. Temporary safety, confidence, rollout, and outcome gates preserve the existing batch timer; a materially changed recommendation resets it. Use `--output json` for automation.
 
 The batch window is bypassed for urgent surge protection. If a workload or shared traffic signal has an active request-rate, latency, error-rate, or concurrency anomaly and the proposal increases replicas, CPU, or memory, the commit can be created immediately. Decreases never bypass the batch window. Set `policy.safety.urgentBypassAllowed: false` for a workload when even urgent increases must wait for the batch window.
 
@@ -325,7 +333,7 @@ go run ./cmd/k8s-recommendation-engine run \
 ```
 
 Use `--output pretty` when you want the full detailed report for a reconcile cycle.
-In dry-run mode, `LAST OUTCOME` is usually `not_applied` because the controller intentionally did not write Git or patch Kubernetes.
+In dry-run mode, `LAST OUTCOME` is usually `dry_run_not_applied` because the controller intentionally did not write Git or patch Kubernetes. In propose mode, `not_applied` is reserved for a recommendation that was included in a successfully pushed proposal commit.
 
 Do not pass `--git-worktree` if you want no Fleet source inspection at all. If `--git-worktree` is set, the app still only builds a dry-run patch plan from the local checkout; it does not commit.
 

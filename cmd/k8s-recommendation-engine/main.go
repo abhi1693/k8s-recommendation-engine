@@ -314,6 +314,7 @@ type commandOptions struct {
 	historyStep            time.Duration
 	gitWorktree            string
 	stateDB                string
+	stateRetention         time.Duration
 	mode                   string
 	proposalKind           string
 	proposalDir            string
@@ -477,6 +478,7 @@ func addCommonFlags(fs *flag.FlagSet) *commandOptions {
 	fs.DurationVar(&options.historyStep, "history-step", 5*time.Minute, "Prometheus query_range step used for recommendation stats")
 	fs.StringVar(&options.gitWorktree, "git-worktree", "", "local Fleet Git worktree used for dry-run patch planning")
 	fs.StringVar(&options.stateDB, "state-db", "", "SQLite state database used for persistent learning")
+	fs.DurationVar(&options.stateRetention, "state-retention", 14*24*time.Hour, "retention for persisted learning and operational history")
 	fs.StringVar(&options.mode, "mode", "dry-run", "operation mode: dry-run or propose")
 	fs.StringVar(&options.proposalKind, "proposal-kind", "patch", "proposal artifact type when --mode propose: patch or commit")
 	fs.StringVar(&options.proposalDir, "proposal-dir", ".k8s-recommendation-engine/proposals", "relative Git worktree directory for proposal patch files")
@@ -490,6 +492,9 @@ func addCommonFlags(fs *flag.FlagSet) *commandOptions {
 }
 
 func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os.File) error {
+	if options.stateRetention <= 0 {
+		return fmt.Errorf("state-retention must be greater than zero")
+	}
 	profile, err := config.LoadFile(options.configPath)
 	if err != nil {
 		return err
@@ -509,7 +514,7 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 		return err
 	}
 	setReportRecommendationMode(report, options.mode)
-	if err := state.AttachAndRecord(ctx, options.stateDB, report); err != nil {
+	if err := state.Attach(ctx, options.stateDB, report); err != nil {
 		return err
 	}
 	analyzer.AttachSafetyAssessmentsWithPolicy(report, profile)
@@ -530,6 +535,9 @@ func executeAnalyze(ctx context.Context, options *commandOptions, outputFile *os
 		return err
 	}
 	attachGitHealth(ctx, options, profile, report)
+	if err := state.RecordAndPrune(ctx, options.stateDB, report, options.stateRetention); err != nil {
+		return err
+	}
 	if err := state.RecordProposalEvents(ctx, options.stateDB, report); err != nil {
 		return err
 	}

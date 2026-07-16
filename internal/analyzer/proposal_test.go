@@ -430,6 +430,32 @@ func TestCreateProposalRefusesExistingNonProposalCommitWhenNoNewChanges(t *testi
 	}
 }
 
+func TestCreateProposalAllowsSynchronizedNonProposalCommitWhenNoChanges(t *testing.T) {
+	worktree := initProposalGitRepo(t)
+	remote := initBareGitRepo(t)
+	gitTest(t, worktree, "remote", "add", "origin", remote)
+	writeRepoFile(t, worktree, "app.yaml", "cpu: 700m\n")
+	gitTest(t, worktree, "add", ".")
+	gitTest(t, worktree, "commit", "-m", "manual change")
+	gitTest(t, worktree, "push", "-u", "origin", "master")
+	report := &Report{Application: "shipyard", GeneratedAt: time.Date(2026, 7, 8, 20, 0, 0, 0, time.UTC)}
+
+	proposal := CreateProposal(context.Background(), worktree, report, ProposalOptions{
+		Kind:                   "commit",
+		BranchName:             "master",
+		DefaultBranch:          "master",
+		Remote:                 "origin",
+		Push:                   true,
+		AllowDefaultBranchPush: true,
+	})
+	if proposal.Blocked || proposal.Needed || proposal.Pushed {
+		t.Fatalf("synchronized no-op proposal = %#v, want clean no-op", proposal)
+	}
+	if !strings.Contains(proposal.Message, "synchronized") {
+		t.Fatalf("proposal.Message = %q, want synchronized no-op", proposal.Message)
+	}
+}
+
 func TestCreateProposalCommitBlocksExistingNonDefaultBranch(t *testing.T) {
 	worktree := initProposalGitRepo(t)
 	writeRepoFile(t, worktree, "app.yaml", `

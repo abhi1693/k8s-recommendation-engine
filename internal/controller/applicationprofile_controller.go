@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	ConditionReady     = "Ready"
-	ConditionDegraded  = "Degraded"
-	ConditionSuspended = "Suspended"
+	ConditionReady         = "Ready"
+	ConditionProposalReady = "ProposalReady"
+	ConditionDegraded      = "Degraded"
+	ConditionSuspended     = "Suspended"
 )
 
 // ApplicationProfileReconciler reconciles ApplicationProfile resources.
@@ -147,6 +148,7 @@ func (r *ApplicationProfileReconciler) updateSuccessStatus(ctx context.Context, 
 	}
 	degraded := resource.Status.Summary.Degraded > 0 || resource.Status.Summary.Unhealthy > 0 || patchFailed || resource.Status.Summary.Emergencies > 0
 	setCondition(&resource.Status, resource.Generation, ConditionReady, metav1.ConditionTrue, "Reconciled", "Latest profile reconciliation completed", now)
+	setProposalCondition(&resource.Status, resource.Generation, report, now)
 	setCondition(&resource.Status, resource.Generation, ConditionSuspended, metav1.ConditionFalse, "Active", "Profile reconciliation is active", now)
 	if degraded {
 		setCondition(&resource.Status, resource.Generation, ConditionDegraded, metav1.ConditionTrue, "WorkloadsDegraded", "One or more workloads require attention", now)
@@ -163,6 +165,7 @@ func (r *ApplicationProfileReconciler) updateFailureStatus(ctx context.Context, 
 	resource.Status.LastAttemptTime = &nowTime
 	resource.Status.NextReconcileTime = nil
 	setCondition(&resource.Status, resource.Generation, ConditionReady, metav1.ConditionFalse, reason, reconcileErr.Error(), now)
+	setCondition(&resource.Status, resource.Generation, ConditionProposalReady, metav1.ConditionFalse, reason, reconcileErr.Error(), now)
 	setCondition(&resource.Status, resource.Generation, ConditionDegraded, metav1.ConditionTrue, reason, reconcileErr.Error(), now)
 	setCondition(&resource.Status, resource.Generation, ConditionSuspended, metav1.ConditionFalse, "Active", "Profile reconciliation is active", now)
 	return r.Status().Patch(ctx, resource, client.MergeFrom(base))
@@ -175,9 +178,37 @@ func (r *ApplicationProfileReconciler) updateSuspendedStatus(ctx context.Context
 	resource.Status.LastAttemptTime = &nowTime
 	resource.Status.NextReconcileTime = nil
 	setCondition(&resource.Status, resource.Generation, ConditionReady, metav1.ConditionFalse, "Suspended", "Profile reconciliation is suspended", now)
+	setCondition(&resource.Status, resource.Generation, ConditionProposalReady, metav1.ConditionFalse, "Suspended", "Profile reconciliation is suspended", now)
 	setCondition(&resource.Status, resource.Generation, ConditionDegraded, metav1.ConditionFalse, "Suspended", "Profile reconciliation is suspended", now)
 	setCondition(&resource.Status, resource.Generation, ConditionSuspended, metav1.ConditionTrue, "Suspended", "Profile reconciliation is suspended", now)
 	return r.Status().Patch(ctx, resource, client.MergeFrom(base))
+}
+
+func setProposalCondition(status *recommendationv1alpha1.ApplicationProfileStatus, generation int64, report *analyzer.Report, now time.Time) {
+	if report == nil || report.Proposal == nil {
+		setCondition(status, generation, ConditionProposalReady, metav1.ConditionTrue, "NotRequired", "No Git proposal was required", now)
+		return
+	}
+	proposal := report.Proposal
+	if proposal.Blocked || len(proposal.Errors) > 0 {
+		message := proposal.Message
+		if message == "" && len(proposal.BlockReasons) > 0 {
+			message = proposal.BlockReasons[0]
+		}
+		if message == "" && len(proposal.Errors) > 0 {
+			message = proposal.Errors[0]
+		}
+		if message == "" {
+			message = "Git proposal is blocked"
+		}
+		setCondition(status, generation, ConditionProposalReady, metav1.ConditionFalse, "ProposalBlocked", message, now)
+		return
+	}
+	message := proposal.Message
+	if message == "" {
+		message = "Git proposal path is ready"
+	}
+	setCondition(status, generation, ConditionProposalReady, metav1.ConditionTrue, "ProposalReady", message, now)
 }
 
 func (r *ApplicationProfileReconciler) recordRecoveryEvents(resource *recommendationv1alpha1.ApplicationProfile, report *analyzer.Report) {

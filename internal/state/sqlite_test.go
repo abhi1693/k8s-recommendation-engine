@@ -54,7 +54,7 @@ func TestAttachAndRecordPersistsPriorLearning(t *testing.T) {
 	}
 }
 
-func TestAttachAndRecordClassifiesProposeNotApplied(t *testing.T) {
+func TestAttachAndRecordDoesNotClassifyUnpushedProposalAsNotApplied(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	first := testReport()
 	first.Workloads[0].Recommendation.Mode = "propose"
@@ -70,6 +70,34 @@ func TestAttachAndRecordClassifiesProposeNotApplied(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	persistent := second.Workloads[0].Recommendation.Learning.Persistent
+	if persistent == nil || persistent.LastOutcome == nil {
+		t.Fatal("second last outcome is nil")
+	}
+	if persistent.LastOutcome.Status != "no_action_taken" {
+		t.Fatalf("LastOutcome.Status = %q, want no_action_taken", persistent.LastOutcome.Status)
+	}
+}
+
+func TestRecordClassifiesPushedProposalAsNotApplied(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first := testProposalReport(time.Date(2026, 7, 8, 19, 30, 0, 0, time.UTC))
+	first.Workloads[0].Recommendation.RecommendedCPURequest = "800m"
+	first.Workloads[0].Recommendation.PatchPlan.Changes[0].Recommended = "800m"
+	if err := Attach(context.Background(), path, first); err != nil {
+		t.Fatal(err)
+	}
+	first.Proposal.Pushed = true
+	if err := Record(context.Background(), path, first); err != nil {
+		t.Fatal(err)
+	}
+
+	second := testProposalReport(time.Date(2026, 7, 8, 19, 35, 0, 0, time.UTC))
+	second.Workloads[0].Recommendation.RecommendedCPURequest = "800m"
+	second.Workloads[0].Recommendation.PatchPlan.Changes[0].Recommended = "800m"
+	if err := Attach(context.Background(), path, second); err != nil {
+		t.Fatal(err)
+	}
 	persistent := second.Workloads[0].Recommendation.Learning.Persistent
 	if persistent == nil || persistent.LastOutcome == nil {
 		t.Fatal("second last outcome is nil")
@@ -801,6 +829,41 @@ func TestProposalBatchResetsWindowWhenRecommendationChanges(t *testing.T) {
 	}
 	if !containsPrefix(plan.BlockReasons, "proposal batch window open:") {
 		t.Fatalf("missing batch window reason after changed recommendation: %#v", plan.BlockReasons)
+	}
+}
+
+func TestProposalBatchPreservesWindowAcrossTemporaryGate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	firstSeen := time.Date(2026, 7, 9, 18, 0, 0, 0, time.UTC)
+	first := testProposalReport(firstSeen)
+	first.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, first, nil, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	gated := testProposalReport(firstSeen.Add(5 * time.Minute))
+	gated.Proposal = nil
+	gated.Workloads[0].Recommendation.PatchPlan.Blocked = true
+	gated.Workloads[0].Recommendation.PatchPlan.Needed = false
+	gated.Workloads[0].Recommendation.PatchPlan.Changes = nil
+	if err := ApplyProposalBatch(context.Background(), path, gated, nil, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	status, err := ProposalBatchStatus(context.Background(), path, 15*time.Minute, firstSeen.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Summary.Total != 1 || status.Items[0].FirstSeenAt != firstSeen {
+		t.Fatalf("batch status after temporary gate = %#v, want preserved first-seen time", status)
+	}
+
+	released := testProposalReport(firstSeen.Add(16 * time.Minute))
+	released.Proposal = nil
+	if err := ApplyProposalBatch(context.Background(), path, released, nil, "commit", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if released.Workloads[0].Recommendation.PatchPlan.Blocked {
+		t.Fatalf("batch remained blocked after preserved window elapsed: %#v", released.Workloads[0].Recommendation.PatchPlan)
 	}
 }
 

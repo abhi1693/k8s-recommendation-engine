@@ -22,6 +22,7 @@ type AnalyzerProcessor struct {
 	Kube                   *kube.Client
 	Prometheus             *prom.Client
 	StateDB                string
+	StateRetention         time.Duration
 	HistoryWindow          time.Duration
 	HistoryStep            time.Duration
 	AvailabilityRecovery   bool
@@ -50,7 +51,7 @@ func (p *AnalyzerProcessor) Process(ctx context.Context, profile *config.Applica
 	for index := range report.Workloads {
 		report.Workloads[index].Recommendation.Mode = p.mode()
 	}
-	if err := state.AttachAndRecord(ctx, p.StateDB, report); err != nil {
+	if err := state.Attach(ctx, p.StateDB, report); err != nil {
 		return nil, err
 	}
 	analyzer.AttachSafetyAssessmentsWithPolicy(report, profile)
@@ -93,6 +94,9 @@ func (p *AnalyzerProcessor) Process(ctx context.Context, profile *config.Applica
 			Remote:      p.ProposalRemote,
 			PushEnabled: p.ProposalPush,
 		})
+	}
+	if err := state.RecordAndPrune(ctx, p.StateDB, report, p.StateRetention); err != nil {
+		return nil, err
 	}
 	if err := state.RecordProposalEvents(ctx, p.StateDB, report); err != nil {
 		return nil, err

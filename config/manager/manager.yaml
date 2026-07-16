@@ -58,10 +58,11 @@ spec:
             - /usr/local/bin/k8s-recommendation-engine
           args:
             - controller
-            - --leader-elect
             - --watch-namespace=$(POD_NAMESPACE)
             - --prometheus-url=$(PROMETHEUS_URL)
             - --state-db=/var/lib/k8s-recommendation-engine/controller.db
+            - --state-retention=336h
+            - --reconcile-timeout=5m
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
           env:

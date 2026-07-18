@@ -71,6 +71,19 @@ func TestContainerReport(t *testing.T) {
 	}
 }
 
+func TestContainerReportIncludesMemoryLimitBytes(t *testing.T) {
+	limits := corev1.ResourceList{
+		corev1.ResourceMemory: resource.MustParse("512Mi"),
+	}
+	got := containerReport("web", nil, limits)
+	if got.MemoryLimit != "512Mi" {
+		t.Fatalf("MemoryLimit = %q, want 512Mi", got.MemoryLimit)
+	}
+	if got.MemoryLimitBytes != 512*1024*1024 {
+		t.Fatalf("MemoryLimitBytes = %f", got.MemoryLimitBytes)
+	}
+}
+
 func TestBuildRecommendationHoldsScaleDownWithoutHistory(t *testing.T) {
 	report := WorkloadReport{
 		Replicas: 2,
@@ -140,6 +153,71 @@ func TestBuildRecommendationIncreasesReplicasOnSaturation(t *testing.T) {
 	}
 	if got.RecommendedCPURequest != "740m" {
 		t.Fatalf("RecommendedCPURequest = %q, want 740m", got.RecommendedCPURequest)
+	}
+}
+
+func TestBuildRecommendationClampsMemoryRequestToLimit(t *testing.T) {
+	report := WorkloadReport{
+		Replicas: 1,
+		Containers: []ContainerReport{
+			{
+				Name:               "web",
+				MemoryRequest:      "231Mi",
+				MemoryRequestBytes: 231 * 1024 * 1024,
+				MemoryLimit:        "240Mi",
+				MemoryLimitBytes:   240 * 1024 * 1024,
+			},
+		},
+		MetricsCondition: "healthy",
+		MetricSignals: []SignalReport{
+			sampleSignal("memory_working_set", 230*1024*1024),
+		},
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{Memory: true},
+		Bounds: config.BoundsSpec{
+			Memory: config.ChangeBounds{MaxIncreasePercent: 25},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.RecommendedMemoryRequest != "240Mi" {
+		t.Fatalf("RecommendedMemoryRequest = %q, want 240Mi", got.RecommendedMemoryRequest)
+	}
+	if !contains(got.ReasonCodes, "memory_request_clamped_to_limit:240Mi") {
+		t.Fatalf("ReasonCodes missing clamp reason: %#v", got.ReasonCodes)
+	}
+}
+
+func TestBuildRecommendationClampsCPURequestToLimit(t *testing.T) {
+	report := WorkloadReport{
+		Replicas: 1,
+		Containers: []ContainerReport{
+			{
+				Name:            "web",
+				CPURequest:      "500m",
+				CPURequestCores: 0.5,
+				CPULimit:        "600m",
+			},
+		},
+		MetricsCondition: "healthy",
+		MetricSignals: []SignalReport{
+			sampleSignal("cpu_usage", 0.5),
+		},
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{CPU: true},
+		Bounds: config.BoundsSpec{
+			CPU: config.ChangeBounds{MaxIncreasePercent: 50},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.RecommendedCPURequest != "600m" {
+		t.Fatalf("RecommendedCPURequest = %q, want 600m", got.RecommendedCPURequest)
+	}
+	if !contains(got.ReasonCodes, "cpu_request_clamped_to_limit:600m") {
+		t.Fatalf("ReasonCodes missing clamp reason: %#v", got.ReasonCodes)
 	}
 }
 
@@ -603,6 +681,15 @@ func hasLearnedDecision(decisions []LearnedDecision, subject string) bool {
 
 func containsSubstring(value, want string) bool {
 	return strings.Contains(value, want)
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestClassifyAnomaly(t *testing.T) {

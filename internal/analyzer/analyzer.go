@@ -571,6 +571,7 @@ func containerReport(name string, requests, limits corev1.ResourceList) Containe
 	}
 	if value, ok := limits[corev1.ResourceMemory]; ok {
 		report.MemoryLimit = value.String()
+		report.MemoryLimitBytes = float64(value.Value())
 	}
 	return report
 }
@@ -657,11 +658,13 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 			perPodCPU := cpuForDecision / replicas
 			recommendedCPU := perPodCPU / cpuPolicy.TargetUtilization
 			recommendation.RecommendedCPURequest = boundedCPURequest(container.CPURequestCores, recommendedCPU, cpuPolicy.MaxIncreasePercent, cpuPolicy.MaxDecreasePercent)
+			recommendation.RecommendedCPURequest = clampCPURequestToLimit(recommendation.RecommendedCPURequest, container.CPULimit, &recommendation)
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "cpu_request_increase_recommended")
 		} else if workload.Scaling.CPU && cpuUtilization < cpuPolicy.DecreaseThreshold && resourceDownscaleAllowed(report.MetricSignals, "cpu_usage") {
 			perPodCPU := cpuForDecision / replicas
 			recommendedCPU := perPodCPU / cpuPolicy.TargetUtilization
 			recommendation.RecommendedCPURequest = boundedCPURequest(container.CPURequestCores, recommendedCPU, cpuPolicy.MaxIncreasePercent, cpuPolicy.MaxDecreasePercent)
+			recommendation.RecommendedCPURequest = clampCPURequestToLimit(recommendation.RecommendedCPURequest, container.CPULimit, &recommendation)
 			if recommendation.RecommendedCPURequest != container.CPURequest {
 				recommendation.ReasonCodes = append(recommendation.ReasonCodes, "cpu_request_decrease_recommended")
 			} else {
@@ -703,11 +706,13 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 			perPodMemory := memoryForDecision / replicas
 			recommendedMemory := perPodMemory / memoryPolicy.TargetUtilization
 			recommendation.RecommendedMemoryRequest = boundedMemoryRequest(container.MemoryRequestBytes, recommendedMemory, memoryPolicy.MaxIncreasePercent, memoryPolicy.MaxDecreasePercent)
+			recommendation.RecommendedMemoryRequest = clampMemoryRequestToLimit(recommendation.RecommendedMemoryRequest, container.MemoryLimit, &recommendation)
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "memory_request_increase_recommended")
 		} else if workload.Scaling.Memory && memoryUtilization < memoryPolicy.DecreaseThreshold && resourceDownscaleAllowed(report.MetricSignals, "memory_working_set") {
 			perPodMemory := memoryForDecision / replicas
 			recommendedMemory := perPodMemory / memoryPolicy.TargetUtilization
 			recommendation.RecommendedMemoryRequest = boundedMemoryRequest(container.MemoryRequestBytes, recommendedMemory, memoryPolicy.MaxIncreasePercent, memoryPolicy.MaxDecreasePercent)
+			recommendation.RecommendedMemoryRequest = clampMemoryRequestToLimit(recommendation.RecommendedMemoryRequest, container.MemoryLimit, &recommendation)
 			if recommendation.RecommendedMemoryRequest != container.MemoryRequest {
 				recommendation.ReasonCodes = append(recommendation.ReasonCodes, "memory_request_decrease_recommended")
 			} else {
@@ -2237,6 +2242,17 @@ func boundedCPURequest(currentCores, recommendedCores float64, maxIncreasePercen
 	return fmt.Sprintf("%dm", milli)
 }
 
+func clampCPURequestToLimit(recommended, limit string, recommendation *Recommendation) string {
+	clamped, ok := clampResourceRequestToLimit(recommended, limit)
+	if !ok {
+		return recommended
+	}
+	if recommendation != nil {
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("cpu_request_clamped_to_limit:%s", limit))
+	}
+	return clamped
+}
+
 func boundedMemoryRequest(currentBytes, recommendedBytes float64, maxIncreasePercent, maxDecreasePercent int) string {
 	if maxIncreasePercent > 0 {
 		maxBytes := currentBytes * (1 + float64(maxIncreasePercent)/100)
@@ -2251,6 +2267,35 @@ func boundedMemoryRequest(currentBytes, recommendedBytes float64, maxIncreasePer
 		mi = 1
 	}
 	return fmt.Sprintf("%dMi", mi)
+}
+
+func clampMemoryRequestToLimit(recommended, limit string, recommendation *Recommendation) string {
+	clamped, ok := clampResourceRequestToLimit(recommended, limit)
+	if !ok {
+		return recommended
+	}
+	if recommendation != nil {
+		recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("memory_request_clamped_to_limit:%s", limit))
+	}
+	return clamped
+}
+
+func clampResourceRequestToLimit(recommended, limit string) (string, bool) {
+	if recommended == "" || limit == "" {
+		return recommended, false
+	}
+	recommendedQuantity, err := resource.ParseQuantity(recommended)
+	if err != nil {
+		return recommended, false
+	}
+	limitQuantity, err := resource.ParseQuantity(limit)
+	if err != nil {
+		return recommended, false
+	}
+	if recommendedQuantity.Cmp(limitQuantity) <= 0 {
+		return recommended, false
+	}
+	return limitQuantity.String(), true
 }
 
 func maxInt32(values ...int32) int32 {

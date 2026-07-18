@@ -307,6 +307,61 @@ func TestStabilizeRecommendationKeepsPriorCloseCPUAndMemoryTargets(t *testing.T)
 	}
 }
 
+func TestStabilizeRecommendationClampsPriorMemoryTargetToLimit(t *testing.T) {
+	report := testReport()
+	workload := &report.Workloads[0]
+	workload.Containers = []analyzer.ContainerReport{
+		{
+			Name:               "web",
+			MemoryLimit:        "240Mi",
+			MemoryLimitBytes:   240 * 1024 * 1024,
+			MemoryRequest:      "231Mi",
+			MemoryRequestBytes: 231 * 1024 * 1024,
+		},
+	}
+	workload.Recommendation.CurrentMemoryRequest = "231Mi"
+	workload.Recommendation.RecommendedMemoryRequest = "255Mi"
+
+	stabilizeRecommendation(workload, &analyzer.PersistentLearning{
+		PriorRecommendationRuns:      1,
+		LastRecommendedMemoryRequest: "255Mi",
+	})
+
+	if workload.Recommendation.RecommendedMemoryRequest != "240Mi" {
+		t.Fatalf("RecommendedMemoryRequest = %q, want 240Mi", workload.Recommendation.RecommendedMemoryRequest)
+	}
+	if !contains(workload.Recommendation.ReasonCodes, "memory_request_clamped_to_limit:240Mi") {
+		t.Fatalf("missing memory limit clamp reason: %#v", workload.Recommendation.ReasonCodes)
+	}
+}
+
+func TestStabilizeRecommendationClampsPriorCPUTargetToLimit(t *testing.T) {
+	report := testReport()
+	workload := &report.Workloads[0]
+	workload.Containers = []analyzer.ContainerReport{
+		{
+			Name:            "web",
+			CPULimit:        "600m",
+			CPURequest:      "500m",
+			CPURequestCores: 0.5,
+		},
+	}
+	workload.Recommendation.CurrentCPURequest = "500m"
+	workload.Recommendation.RecommendedCPURequest = "625m"
+
+	stabilizeRecommendation(workload, &analyzer.PersistentLearning{
+		PriorRecommendationRuns:   1,
+		LastRecommendedCPURequest: "625m",
+	})
+
+	if workload.Recommendation.RecommendedCPURequest != "600m" {
+		t.Fatalf("RecommendedCPURequest = %q, want 600m", workload.Recommendation.RecommendedCPURequest)
+	}
+	if !contains(workload.Recommendation.ReasonCodes, "cpu_request_clamped_to_limit:600m") {
+		t.Fatalf("missing CPU limit clamp reason: %#v", workload.Recommendation.ReasonCodes)
+	}
+}
+
 func TestStabilizeRecommendationAllowsMeaningfulChange(t *testing.T) {
 	report := testReport()
 	workload := &report.Workloads[0]

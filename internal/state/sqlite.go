@@ -1167,6 +1167,40 @@ func stabilizeRecommendation(workload *analyzer.WorkloadReport, summary *analyze
 		rec.RecommendedMemoryRequest = summary.LastRecommendedMemoryRequest
 		rec.ReasonCodes = append(rec.ReasonCodes, "memory_request_stabilized_to_prior:"+summary.LastRecommendedMemoryRequest)
 	}
+	clampRecommendationRequestsToLimits(workload)
+}
+
+func clampRecommendationRequestsToLimits(workload *analyzer.WorkloadReport) {
+	if workload == nil || len(workload.Containers) != 1 {
+		return
+	}
+	container := workload.Containers[0]
+	if clamped, ok := clampRequestToLimit(workload.Recommendation.RecommendedCPURequest, container.CPULimit); ok {
+		workload.Recommendation.RecommendedCPURequest = clamped
+		workload.Recommendation.ReasonCodes = append(workload.Recommendation.ReasonCodes, "cpu_request_clamped_to_limit:"+container.CPULimit)
+	}
+	if clamped, ok := clampRequestToLimit(workload.Recommendation.RecommendedMemoryRequest, container.MemoryLimit); ok {
+		workload.Recommendation.RecommendedMemoryRequest = clamped
+		workload.Recommendation.ReasonCodes = append(workload.Recommendation.ReasonCodes, "memory_request_clamped_to_limit:"+container.MemoryLimit)
+	}
+}
+
+func clampRequestToLimit(recommended, limit string) (string, bool) {
+	if recommended == "" || limit == "" {
+		return recommended, false
+	}
+	recommendedQuantity, ok := parseQuantity(recommended)
+	if !ok {
+		return recommended, false
+	}
+	limitQuantity, ok := parseQuantity(limit)
+	if !ok {
+		return recommended, false
+	}
+	if recommendedQuantity.Cmp(limitQuantity) <= 0 {
+		return recommended, false
+	}
+	return limitQuantity.String(), true
 }
 
 func stableResourceRecommendation(current, recommended, previousRecommended, minAbsolute string, maxRelative float64) bool {

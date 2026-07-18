@@ -73,6 +73,7 @@ type ContainerReport struct {
 	MemoryRequestBytes float64 `json:"memoryRequestBytes,omitempty"`
 	CPULimit           string  `json:"cpuLimit,omitempty"`
 	MemoryLimit        string  `json:"memoryLimit,omitempty"`
+	MemoryLimitBytes   float64 `json:"memoryLimitBytes,omitempty"`
 }
 
 type Autoscaler struct {

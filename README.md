@@ -99,7 +99,7 @@ The controller exposes the bounded result under `status.workloads[*].patch`. Map
 
 The values file must be the effective highest-precedence Helm input. A later `valuesFrom`, `--set`, or inline override can prevent Git and the live workload from converging. Keep one `ApplicationProfile` owner per Git scalar; ownership cannot currently be coordinated across separate profile resources.
 
-Initial Helm support intentionally covers one mapping-only YAML document with existing scalar leaves. Structured encoding preserves keys and comments but can normalize blank lines or indentation on the first proposal; the displayed plan diff uses the raw source so that formatting churn is visible before a commit. Sequence traversal, embedded `HelmChart.spec.valuesContent`, chart-specific transforms, and multi-container resource selection remain out of scope.
+Initial Helm support intentionally covers one mapping-only YAML document with existing scalar leaves. Structured encoding preserves keys and comments but can normalize blank lines or indentation on the first proposal; the displayed plan diff uses the raw source so that formatting churn is visible before a commit. Multi-container workloads can opt into resource mappings by setting `vars.container` to the target regular container name. Sequence traversal, embedded `HelmChart.spec.valuesContent`, and chart-specific transforms remain out of scope.
 
 Run the controller lifecycle test against an envtest API server:
 

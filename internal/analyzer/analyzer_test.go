@@ -252,6 +252,30 @@ func TestBuildRecommendationHoldsScaleDownWithoutHistory(t *testing.T) {
 	}
 }
 
+func TestBuildRecommendationUsesConfiguredContainerSelector(t *testing.T) {
+	report := WorkloadReport{
+		Replicas: 3,
+		Containers: []ContainerReport{
+			{Name: "valkey", CPURequest: "50m", MemoryRequest: "112Mi", CPURequestCores: 0.05, MemoryRequestBytes: 112 * 1024 * 1024},
+			{Name: "sentinel", CPURequest: "35m", MemoryRequest: "32Mi", CPURequestCores: 0.035, MemoryRequestBytes: 32 * 1024 * 1024},
+			{Name: "metrics", CPURequest: "10m", MemoryRequest: "32Mi", CPURequestCores: 0.01, MemoryRequestBytes: 32 * 1024 * 1024},
+		},
+		MetricsCondition: "healthy",
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{CPU: true, Memory: true},
+		Vars:    map[string]string{"container": "valkey"},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.CurrentCPURequest != "50m" || got.CurrentMemoryRequest != "112Mi" {
+		t.Fatalf("current requests = %s/%s, want selected valkey requests", got.CurrentCPURequest, got.CurrentMemoryRequest)
+	}
+	if hasReasonPrefix(got, "multi_container_recommendation_not_implemented") {
+		t.Fatalf("reason codes = %#v, selector should avoid multi-container block", got.ReasonCodes)
+	}
+}
+
 func TestBuildRecommendationIncreasesReplicasOnSaturation(t *testing.T) {
 	report := WorkloadReport{
 		Replicas: 2,

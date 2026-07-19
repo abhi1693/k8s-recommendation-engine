@@ -113,13 +113,13 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 		planReplicaPatch(plan, document, modifiedDocument, workload, report, recoveryChange)
 	}
 
-	if len(report.Containers) == 1 {
-		containerName := report.Containers[0].Name
-		currentCPU := report.Containers[0].CPURequest
+	if container, ok := selectedContainerReport(workload, *report); ok {
+		containerName := container.Name
+		currentCPU := container.CPURequest
 		if currentCPU == "" {
 			currentCPU = report.Recommendation.CurrentCPURequest
 		}
-		currentMemory := report.Containers[0].MemoryRequest
+		currentMemory := container.MemoryRequest
 		if currentMemory == "" {
 			currentMemory = report.Recommendation.CurrentMemoryRequest
 		}
@@ -130,7 +130,11 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 			planContainerRequestPatch(plan, document, modifiedDocument, workload, report, containerName, "memory", currentMemory, report.Recommendation.RecommendedMemoryRequest, report.Recommendation.Stability.Memory, recoveryChange)
 		}
 	} else if plan.SourceFormat == patchSourceHelmValues && (workload.Scaling.CPU || workload.Scaling.Memory) {
-		plan.Errors = append(plan.Errors, fmt.Sprintf("Helm values resource mappings require exactly one regular container in the live %s, found %d", workload.TargetRef.Kind, len(report.Containers)))
+		if selector := workloadContainerSelector(workload); selector != "" {
+			plan.Errors = append(plan.Errors, fmt.Sprintf("Helm values resource mappings configured vars.container=%q, but the live %s has no matching regular container", selector, workload.TargetRef.Kind))
+		} else {
+			plan.Errors = append(plan.Errors, fmt.Sprintf("Helm values resource mappings require exactly one regular container in the live %s or an explicit vars.container selector, found %d", workload.TargetRef.Kind, len(report.Containers)))
+		}
 	}
 
 	plan.Needed = len(plan.Changes) > 0

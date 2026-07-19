@@ -35,5 +35,5 @@ Keep `workload.sourceFile` as the Git file selector and add optional `workload.h
 - Shared values files such as a server plus worker or login component are supported safely.
 - Structured YAML encoding preserves ordering and comments but may normalize scalar formatting or indentation in a proposed file.
 - The configured file must be the effective highest-precedence values input.
-- Arrays, embedded values block scalars, transforms, multi-container selection, and non-Deployment/StatefulSet targets require later explicit designs.
+- Arrays, embedded values block scalars, transforms, and non-Deployment/StatefulSet targets require later explicit designs. Multi-container workloads can use resource mappings when `vars.container` names the target regular container.
 - Ownership is validated within one profile, but operators must avoid assigning the same Git scalar to separate profiles until repository-wide ownership coordination exists.

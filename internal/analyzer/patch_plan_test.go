@@ -747,6 +747,40 @@ func TestAttachPatchPlansHelmValuesRejectsMultipleLiveContainers(t *testing.T) {
 	}
 }
 
+func TestAttachPatchPlansHelmValuesUsesConfiguredContainerSelector(t *testing.T) {
+	worktree := t.TempDir()
+	valuesDir := filepath.Join(worktree, "valkey")
+	if err := os.MkdirAll(valuesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(valuesDir, "values.yaml"), []byte("replica:\n  resources:\n    requests:\n      cpu: 50m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := helmPatchProfile("valkey-node", config.HelmValuePaths{CPURequest: []string{"replica", "resources", "requests", "cpu"}})
+	profile.Spec.Namespace = "valkey"
+	profile.Spec.Git.BasePath = "valkey"
+	profile.Spec.Workloads[0].Vars = map[string]string{"container": "valkey"}
+	profile.Spec.Workloads[0].Scaling = config.ScalingSpec{CPU: true}
+	report := helmPatchReport(3, "50m", "112Mi")
+	report.Workloads[0].Namespace = "valkey"
+	report.Workloads[0].Deployment = "valkey-node"
+	report.Workloads[0].Containers = []ContainerReport{
+		{Name: "valkey", CPURequest: "50m", MemoryRequest: "112Mi"},
+		{Name: "sentinel", CPURequest: "35m", MemoryRequest: "32Mi"},
+	}
+	report.Workloads[0].Recommendation.RecommendedCPURequest = "60m"
+
+	AttachPatchPlans(worktree, profile, report)
+	plan := report.Workloads[0].Recommendation.PatchPlan
+	if plan == nil || len(plan.Errors) != 0 || !plan.Needed || len(plan.Changes) != 1 {
+		t.Fatalf("PatchPlan = %#v, want one CPU change without multi-container error", plan)
+	}
+	change := plan.Changes[0]
+	if change.Field != "spec.template.spec.containers[name=valkey].resources.requests.cpu" || change.Current != "50m" || change.Recommended != "60m" {
+		t.Fatalf("change = %#v, want selected valkey CPU change", change)
+	}
+}
+
 func TestAttachPatchPlansRejectsSourceSymlinkOutsideWorktree(t *testing.T) {
 	worktree := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "values.yaml")

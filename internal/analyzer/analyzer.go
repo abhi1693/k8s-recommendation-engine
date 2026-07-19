@@ -670,12 +670,16 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, "availability_recovery_required")
 	}
 
-	if len(report.Containers) != 1 {
-		recommendation.ReasonCodes = append(recommendation.ReasonCodes, "multi_container_recommendation_not_implemented")
+	container, ok := selectedContainerReport(workload, report)
+	if !ok {
+		if selector := workloadContainerSelector(workload); selector != "" {
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "configured_container_not_found:"+selector)
+		} else {
+			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "multi_container_recommendation_not_implemented")
+		}
 		return recommendation
 	}
 
-	container := report.Containers[0]
 	recommendation.CurrentCPURequest = container.CPURequest
 	recommendation.RecommendedCPURequest = container.CPURequest
 	recommendation.CurrentMemoryRequest = container.MemoryRequest
@@ -956,6 +960,28 @@ func wasteSummary(score WasteScore) string {
 		direction = "capacity_increase"
 	}
 	return fmt.Sprintf("%s monthly_cpu=%+.1f_core_hours monthly_memory=%+.1f_gib_hours monthly_replicas=%+.0f_replica_hours", direction, score.MonthlyReduction.CPUCoreHours, score.MonthlyReduction.MemoryGiBHours, score.MonthlyReduction.ReplicaHours)
+}
+
+func workloadContainerSelector(workload config.WorkloadSpec) string {
+	if workload.Vars == nil {
+		return ""
+	}
+	return strings.TrimSpace(workload.Vars["container"])
+}
+
+func selectedContainerReport(workload config.WorkloadSpec, report WorkloadReport) (ContainerReport, bool) {
+	if selector := workloadContainerSelector(workload); selector != "" {
+		for _, container := range report.Containers {
+			if container.Name == selector {
+				return container, true
+			}
+		}
+		return ContainerReport{}, false
+	}
+	if len(report.Containers) == 1 {
+		return report.Containers[0], true
+	}
+	return ContainerReport{}, false
 }
 
 func bytesToGiB(value float64) float64 {

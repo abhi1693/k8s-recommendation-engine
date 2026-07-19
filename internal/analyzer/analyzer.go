@@ -104,10 +104,26 @@ func inPlacePodResizeCapability(capability kube.PodResizeCapability) InPlacePodR
 	}
 }
 
+type workloadSnapshot struct {
+	Kind                         string
+	Name                         string
+	Annotations                  map[string]string
+	Generation                   int64
+	ObservedGeneration           int64
+	Replicas                     int32
+	ReadyReplicas                int32
+	UpdatedReplicas              int32
+	AvailableReplicas            int32
+	UnavailableReplicas          int32
+	Template                     corev1.PodTemplateSpec
+	Selector                     *metav1.LabelSelector
+	RollingUpdateZeroUnavailable bool
+}
+
 func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.ApplicationProfile, workload config.WorkloadSpec, sharedSignals []SignalReport) (WorkloadReport, error) {
-	deployment, err := a.kube.GetDeployment(ctx, profile.Spec.Namespace, workload.TargetRef.Name)
+	target, err := a.getWorkload(ctx, profile.Spec.Namespace, workload)
 	if err != nil {
-		return WorkloadReport{}, fmt.Errorf("get deployment %s/%s: %w", profile.Spec.Namespace, workload.TargetRef.Name, err)
+		return WorkloadReport{}, err
 	}
 
 	report := WorkloadReport{
@@ -115,11 +131,11 @@ func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.Applicat
 		Namespace:      profile.Spec.Namespace,
 		Kind:           workload.TargetRef.Kind,
 		Deployment:     workload.TargetRef.Name,
-		Replicas:       int32(1),
-		ReadyReplicas:  deployment.Status.ReadyReplicas,
-		FleetManaged:   deployment.Annotations["objectset.rio.cattle.io/id"] != "",
-		FleetObjectSet: deployment.Annotations["objectset.rio.cattle.io/id"],
-		HelmRelease:    deployment.Annotations["meta.helm.sh/release-name"],
+		Replicas:       target.Replicas,
+		ReadyReplicas:  target.ReadyReplicas,
+		FleetManaged:   target.Annotations["objectset.rio.cattle.io/id"] != "",
+		FleetObjectSet: target.Annotations["objectset.rio.cattle.io/id"],
+		HelmRelease:    target.Annotations["meta.helm.sh/release-name"],
 		Scaling: ScalingReport{
 			Replicas: workload.Scaling.Replicas,
 			CPU:      workload.Scaling.CPU,
@@ -127,10 +143,7 @@ func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.Applicat
 		},
 		MetricProfile: workload.MetricProfileRef,
 	}
-	if deployment.Spec.Replicas != nil {
-		report.Replicas = *deployment.Spec.Replicas
-	}
-	for _, container := range deployment.Spec.Template.Spec.Containers {
+	for _, container := range target.Template.Spec.Containers {
 		report.Containers = append(report.Containers, containerReport(container.Name, container.Resources.Requests, container.Resources.Limits))
 	}
 
@@ -158,7 +171,7 @@ func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.Applicat
 	}
 	if !report.FleetManaged {
 		report.CommitBlocked = true
-		report.BlockReasons = append(report.BlockReasons, "deployment is not Fleet-managed")
+		report.BlockReasons = append(report.BlockReasons, strings.ToLower(workload.TargetRef.Kind)+" is not Fleet-managed")
 	}
 
 	pdbs, err := a.kube.ListPDBs(ctx, profile.Spec.Namespace)
@@ -166,16 +179,16 @@ func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.Applicat
 		return WorkloadReport{}, fmt.Errorf("list pdb %s: %w", profile.Spec.Namespace, err)
 	}
 	for _, pdb := range pdbs.Items {
-		if pdbMatchesDeployment(pdb, deployment.Spec.Template.Labels) {
+		if pdbMatchesWorkload(pdb, target.Template.Labels) {
 			report.PDBs = append(report.PDBs, pdbReport(pdb))
 		}
 	}
-	availability, err := a.availabilityReport(ctx, profile.Spec.Namespace, deployment)
+	availability, err := a.availabilityReport(ctx, profile.Spec.Namespace, target)
 	if err != nil {
 		return WorkloadReport{}, fmt.Errorf("build availability report %s/%s: %w", profile.Spec.Namespace, workload.TargetRef.Name, err)
 	}
 	report.Availability = availability
-	rollout, err := a.rolloutReport(ctx, profile.Spec.Namespace, deployment)
+	rollout, err := a.rolloutReport(ctx, profile.Spec.Namespace, target)
 	if err != nil {
 		return WorkloadReport{}, fmt.Errorf("build rollout report %s/%s: %w", profile.Spec.Namespace, workload.TargetRef.Name, err)
 	}
@@ -192,21 +205,77 @@ func (a *Analyzer) analyzeWorkload(ctx context.Context, profile *config.Applicat
 	return report, nil
 }
 
-func (a *Analyzer) rolloutReport(ctx context.Context, namespace string, deployment *appsv1.Deployment) (RolloutReport, error) {
-	desired := int32(1)
-	if deployment.Spec.Replicas != nil {
-		desired = *deployment.Spec.Replicas
+func (a *Analyzer) getWorkload(ctx context.Context, namespace string, workload config.WorkloadSpec) (workloadSnapshot, error) {
+	switch workload.TargetRef.Kind {
+	case "Deployment":
+		deployment, err := a.kube.GetDeployment(ctx, namespace, workload.TargetRef.Name)
+		if err != nil {
+			return workloadSnapshot{}, fmt.Errorf("get deployment %s/%s: %w", namespace, workload.TargetRef.Name, err)
+		}
+		replicas := int32(1)
+		if deployment.Spec.Replicas != nil {
+			replicas = *deployment.Spec.Replicas
+		}
+		return workloadSnapshot{
+			Kind:                         "Deployment",
+			Name:                         deployment.Name,
+			Annotations:                  deployment.Annotations,
+			Generation:                   deployment.Generation,
+			ObservedGeneration:           deployment.Status.ObservedGeneration,
+			Replicas:                     replicas,
+			ReadyReplicas:                deployment.Status.ReadyReplicas,
+			UpdatedReplicas:              deployment.Status.UpdatedReplicas,
+			AvailableReplicas:            deployment.Status.AvailableReplicas,
+			UnavailableReplicas:          deployment.Status.UnavailableReplicas,
+			Template:                     deployment.Spec.Template,
+			Selector:                     deployment.Spec.Selector,
+			RollingUpdateZeroUnavailable: deploymentRollingUpdateZeroUnavailable(deployment),
+		}, nil
+	case "StatefulSet":
+		statefulSet, err := a.kube.GetStatefulSet(ctx, namespace, workload.TargetRef.Name)
+		if err != nil {
+			return workloadSnapshot{}, fmt.Errorf("get statefulset %s/%s: %w", namespace, workload.TargetRef.Name, err)
+		}
+		replicas := int32(1)
+		if statefulSet.Spec.Replicas != nil {
+			replicas = *statefulSet.Spec.Replicas
+		}
+		unavailable := replicas - statefulSet.Status.ReadyReplicas
+		if unavailable < 0 {
+			unavailable = 0
+		}
+		return workloadSnapshot{
+			Kind:                         "StatefulSet",
+			Name:                         statefulSet.Name,
+			Annotations:                  statefulSet.Annotations,
+			Generation:                   statefulSet.Generation,
+			ObservedGeneration:           statefulSet.Status.ObservedGeneration,
+			Replicas:                     replicas,
+			ReadyReplicas:                statefulSet.Status.ReadyReplicas,
+			UpdatedReplicas:              statefulSet.Status.UpdatedReplicas,
+			AvailableReplicas:            statefulSet.Status.AvailableReplicas,
+			UnavailableReplicas:          unavailable,
+			Template:                     statefulSet.Spec.Template,
+			Selector:                     statefulSet.Spec.Selector,
+			RollingUpdateZeroUnavailable: statefulSetRollingUpdateZeroUnavailable(statefulSet),
+		}, nil
+	default:
+		return workloadSnapshot{}, fmt.Errorf("target kind %q is unsupported", workload.TargetRef.Kind)
 	}
+}
+
+func (a *Analyzer) rolloutReport(ctx context.Context, namespace string, workload workloadSnapshot) (RolloutReport, error) {
+	desired := maxInt32(workload.Replicas, 1)
 	report := RolloutReport{
 		Evaluated:           true,
 		Settled:             true,
-		Generation:          deployment.Generation,
-		ObservedGeneration:  deployment.Status.ObservedGeneration,
+		Generation:          workload.Generation,
+		ObservedGeneration:  workload.ObservedGeneration,
 		DesiredReplicas:     desired,
-		UpdatedReplicas:     deployment.Status.UpdatedReplicas,
-		ReadyReplicas:       deployment.Status.ReadyReplicas,
-		AvailableReplicas:   deployment.Status.AvailableReplicas,
-		UnavailableReplicas: deployment.Status.UnavailableReplicas,
+		UpdatedReplicas:     workload.UpdatedReplicas,
+		ReadyReplicas:       workload.ReadyReplicas,
+		AvailableReplicas:   workload.AvailableReplicas,
+		UnavailableReplicas: workload.UnavailableReplicas,
 	}
 	if report.ObservedGeneration != report.Generation {
 		report.Reasons = append(report.Reasons, fmt.Sprintf("observed_generation_pending:%d/%d", report.ObservedGeneration, report.Generation))
@@ -224,7 +293,7 @@ func (a *Analyzer) rolloutReport(ctx context.Context, namespace string, deployme
 		report.Reasons = append(report.Reasons, fmt.Sprintf("unavailable_replicas:%d", report.UnavailableReplicas))
 	}
 
-	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	selector, err := metav1.LabelSelectorAsSelector(workload.Selector)
 	if err != nil {
 		return report, err
 	}
@@ -262,16 +331,16 @@ func (a *Analyzer) rolloutReport(ctx context.Context, namespace string, deployme
 	return report, nil
 }
 
-func (a *Analyzer) availabilityReport(ctx context.Context, namespace string, deployment *appsv1.Deployment) (AvailabilityReport, error) {
+func (a *Analyzer) availabilityReport(ctx context.Context, namespace string, workload workloadSnapshot) (AvailabilityReport, error) {
 	report := AvailabilityReport{
-		ReadyEndpoints: deployment.Status.ReadyReplicas,
+		ReadyEndpoints: workload.ReadyReplicas,
 	}
 	services, err := a.kube.ListServices(ctx, namespace)
 	if err != nil {
 		return report, err
 	}
 	for _, service := range services.Items {
-		if serviceMatchesDeployment(service, deployment.Spec.Template.Labels) {
+		if serviceMatchesWorkload(service, workload.Template.Labels) {
 			report.Services = append(report.Services, service.Name)
 			if service.Spec.Type == corev1.ServiceTypeLoadBalancer || service.Spec.Type == corev1.ServiceTypeNodePort {
 				report.Public = true
@@ -279,12 +348,12 @@ func (a *Analyzer) availabilityReport(ctx context.Context, namespace string, dep
 		}
 	}
 	sort.Strings(report.Services)
-	if deployment.Annotations["field.cattle.io/publicEndpoints"] != "" {
+	if workload.Annotations["field.cattle.io/publicEndpoints"] != "" {
 		report.Public = true
 	}
-	report.RollingUpdateZeroUnavailable = rollingUpdateZeroUnavailable(deployment)
+	report.RollingUpdateZeroUnavailable = workload.RollingUpdateZeroUnavailable
 
-	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	selector, err := metav1.LabelSelectorAsSelector(workload.Selector)
 	if err != nil {
 		return report, err
 	}
@@ -308,10 +377,7 @@ func (a *Analyzer) availabilityReport(ctx context.Context, namespace string, dep
 		}
 		return report.FailedPods[i].FailedAt.Before(report.FailedPods[j].FailedAt)
 	})
-	desired := derefInt32(deployment.Spec.Replicas)
-	if desired == 0 && deployment.Spec.Replicas == nil {
-		desired = 1
-	}
+	desired := maxInt32(workload.Replicas, 1)
 	report.Emergency = desired > 0 && report.ReadyEndpoints < desired && len(report.FailedPods) > 0
 	if report.Emergency {
 		report.Reasons = append(report.Reasons, fmt.Sprintf("failed_pods:%d", len(report.FailedPods)))
@@ -362,7 +428,7 @@ func failedPodReport(pod corev1.Pod) (FailedPodReport, bool) {
 	return FailedPodReport{}, false
 }
 
-func serviceMatchesDeployment(service corev1.Service, podLabels map[string]string) bool {
+func serviceMatchesWorkload(service corev1.Service, podLabels map[string]string) bool {
 	if len(service.Spec.Selector) == 0 {
 		return false
 	}
@@ -374,7 +440,7 @@ func serviceMatchesDeployment(service corev1.Service, podLabels map[string]strin
 	return true
 }
 
-func rollingUpdateZeroUnavailable(deployment *appsv1.Deployment) bool {
+func deploymentRollingUpdateZeroUnavailable(deployment *appsv1.Deployment) bool {
 	if deployment.Spec.Strategy.Type != "" && deployment.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
 		return false
 	}
@@ -382,6 +448,16 @@ func rollingUpdateZeroUnavailable(deployment *appsv1.Deployment) bool {
 		return false
 	}
 	return intstrCeil(*deployment.Spec.Strategy.RollingUpdate.MaxUnavailable, maxInt32(derefInt32(deployment.Spec.Replicas), 1)) == 0
+}
+
+func statefulSetRollingUpdateZeroUnavailable(statefulSet *appsv1.StatefulSet) bool {
+	if statefulSet.Spec.UpdateStrategy.Type != "" && statefulSet.Spec.UpdateStrategy.Type != appsv1.RollingUpdateStatefulSetStrategyType {
+		return false
+	}
+	if statefulSet.Spec.UpdateStrategy.RollingUpdate == nil || statefulSet.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable == nil {
+		return false
+	}
+	return intstrCeil(*statefulSet.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable, maxInt32(derefInt32(statefulSet.Spec.Replicas), 1)) == 0
 }
 
 func podReady(pod corev1.Pod) bool {
@@ -419,7 +495,7 @@ func derefInt32(value *int32) int32 {
 	return *value
 }
 
-func pdbMatchesDeployment(pdb policyv1.PodDisruptionBudget, podLabels map[string]string) bool {
+func pdbMatchesWorkload(pdb policyv1.PodDisruptionBudget, podLabels map[string]string) bool {
 	if pdb.Spec.Selector == nil {
 		return false
 	}

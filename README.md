@@ -44,7 +44,7 @@ Leader election is disabled by default and is unnecessary for the supplied singl
 
 ## Git Source Mappings
 
-`sourceFile` normally points to a Kubernetes manifest containing the target `Deployment`. For a Helm-managed Deployment, point it at the effective values file and add `helmValues.paths`. Each path is an ordered list of YAML mapping keys, so chart-specific names and keys containing dots or hyphens remain unambiguous.
+`sourceFile` normally points to a Kubernetes manifest containing the target `Deployment` or `StatefulSet`. For a Helm-managed workload, point it at the effective values file and add `helmValues.paths`. Each path is an ordered list of YAML mapping keys, so chart-specific names and keys containing dots or hyphens remain unambiguous.
 
 Two Deployments can safely share one values file when they own disjoint paths:
 
@@ -93,13 +93,13 @@ spec:
         memory: true
 ```
 
-The semantic fields remain Deployment replicas and container requests; the paths only describe where those fields live in Git. Patch planning requires every mapped leaf to already exist as a scalar and to match the live Deployment baseline. It compares Kubernetes quantities semantically, so values such as `0.5` and `500m` are equivalent. Missing keys, YAML aliases/merges, source drift, overlapping ownership, mixed manifest/Helm mappings, and concurrent edits block the proposal instead of creating or overwriting a value.
+The semantic fields remain workload replicas and container requests; the paths only describe where those fields live in Git. Patch planning requires every mapped leaf to already exist as a scalar and to match the live workload baseline. It compares Kubernetes quantities semantically, so values such as `0.5` and `500m` are equivalent. Missing keys, YAML aliases/merges, source drift, overlapping ownership, mixed manifest/Helm mappings, and concurrent edits block the proposal instead of creating or overwriting a value.
 
 The controller exposes the bounded result under `status.workloads[*].patch`. Mapping and source errors mark that workload blocked and set the profile's `Degraded` condition while leaving the full diff out of the CR status.
 
-The values file must be the effective highest-precedence Helm input. A later `valuesFrom`, `--set`, or inline override can prevent Git and the live Deployment from converging. Keep one `ApplicationProfile` owner per Git scalar; ownership cannot currently be coordinated across separate profile resources.
+The values file must be the effective highest-precedence Helm input. A later `valuesFrom`, `--set`, or inline override can prevent Git and the live workload from converging. Keep one `ApplicationProfile` owner per Git scalar; ownership cannot currently be coordinated across separate profile resources.
 
-Initial Helm support intentionally covers one mapping-only YAML document with existing scalar leaves. Structured encoding preserves keys and comments but can normalize blank lines or indentation on the first proposal; the displayed plan diff uses the raw source so that formatting churn is visible before a commit. Sequence traversal, embedded `HelmChart.spec.valuesContent`, chart-specific transforms, StatefulSet targets, and multi-container resource selection remain out of scope.
+Initial Helm support intentionally covers one mapping-only YAML document with existing scalar leaves. Structured encoding preserves keys and comments but can normalize blank lines or indentation on the first proposal; the displayed plan diff uses the raw source so that formatting churn is visible before a commit. Sequence traversal, embedded `HelmChart.spec.valuesContent`, chart-specific transforms, and multi-container resource selection remain out of scope.
 
 Run the controller lifecycle test against an envtest API server:
 
@@ -287,7 +287,7 @@ The status output shows each pending workload, first seen time, ready time, rema
 
 The batch window is bypassed for urgent surge protection. If a workload or shared traffic signal has an active request-rate, latency, error-rate, or concurrency anomaly and the proposal increases replicas, CPU, or memory, the commit can be created immediately. Decreases never bypass the batch window. Set `policy.safety.urgentBypassAllowed: false` for a workload when even urgent increases must wait for the batch window.
 
-Before writing a proposal, the engine also checks the live Deployment rollout state. A proposal is blocked while the Deployment generation is still pending, updated/ready/available replicas have not caught up, unavailable replicas exist, or selected Pods are terminating, pending, unready, or have incomplete init containers. This prevents the controller from stacking new recommendations on top of an app that Fleet or Kubernetes has not finished applying yet.
+Before writing a proposal, the engine also checks the live workload rollout state. A proposal is blocked while the workload generation is still pending, updated/ready/available replicas have not caught up, unavailable replicas exist, or selected Pods are terminating, pending, unready, or have incomplete init containers. This prevents the controller from stacking new recommendations on top of an app that Fleet or Kubernetes has not finished applying yet.
 
 Every recommendation also gets a safety classification before any Git proposal is written:
 
@@ -381,7 +381,7 @@ go run ./cmd/k8s-recommendation-engine proposal observe \
   --output text
 ```
 
-Observation compares Git desired replicas/CPU/memory with the live Kubernetes Deployment spec and records convergence status in SQLite when `--state-db` is set.
+Observation compares Git desired replicas/CPU/memory with the live Kubernetes workload spec and records convergence status in SQLite when `--state-db` is set.
 
 Rollback the latest `k8s-recommendation-engine:` proposal commit on the configured default branch:
 
@@ -410,7 +410,7 @@ go run ./cmd/k8s-recommendation-engine proposal auto-rollback \
   --allow-default-branch-push
 ```
 
-Auto rollback first runs live analysis and convergence observation. It only creates a rollback commit when Git desired state matches the live Deployment and the observed outcome is `regressed` or `unsafe`. Pending Fleet convergence, drift, dirty Git worktrees, and missing proposal commits block automatic rollback.
+Auto rollback first runs live analysis and convergence observation. It only creates a rollback commit when Git desired state matches the live workload and the observed outcome is `regressed` or `unsafe`. Pending Fleet convergence, drift, dirty Git worktrees, and missing proposal commits block automatic rollback.
 
 JSON output:
 

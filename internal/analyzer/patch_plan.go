@@ -130,7 +130,7 @@ func buildPatchPlan(worktree string, profile *config.ApplicationProfile, workloa
 			planContainerRequestPatch(plan, document, modifiedDocument, workload, report, containerName, "memory", currentMemory, report.Recommendation.RecommendedMemoryRequest, report.Recommendation.Stability.Memory, recoveryChange)
 		}
 	} else if plan.SourceFormat == patchSourceHelmValues && (workload.Scaling.CPU || workload.Scaling.Memory) {
-		plan.Errors = append(plan.Errors, fmt.Sprintf("Helm values resource mappings require exactly one regular container in the live Deployment, found %d", len(report.Containers)))
+		plan.Errors = append(plan.Errors, fmt.Sprintf("Helm values resource mappings require exactly one regular container in the live %s, found %d", workload.TargetRef.Kind, len(report.Containers)))
 	}
 
 	plan.Needed = len(plan.Changes) > 0
@@ -318,7 +318,7 @@ func validateHelmReplicaBaseline(path []string, current string, live int32) erro
 		return fmt.Errorf("configured Helm value %s must be a non-negative integer replica count, got %q", formatHelmSourcePath(path), current)
 	}
 	if int32(value) != live {
-		return fmt.Errorf("configured Helm value %s is %q but the live Deployment has %d replicas; the mapping may be wrong or Fleet is not converged", formatHelmSourcePath(path), current, live)
+		return fmt.Errorf("configured Helm value %s is %q but the live workload has %d replicas; the mapping may be wrong or Fleet is not converged", formatHelmSourcePath(path), current, live)
 	}
 	return nil
 }
@@ -329,14 +329,14 @@ func validateHelmResourceBaseline(path []string, current, live, resourceName str
 		return fmt.Errorf("configured Helm value %s has invalid %s quantity %q: %v", formatHelmSourcePath(path), resourceName, current, err)
 	}
 	if strings.TrimSpace(live) == "" {
-		return fmt.Errorf("live Deployment does not have a %s request; the Helm mapping cannot be verified", resourceName)
+		return fmt.Errorf("live workload does not have a %s request; the Helm mapping cannot be verified", resourceName)
 	}
 	liveQuantity, err := resource.ParseQuantity(live)
 	if err != nil {
-		return fmt.Errorf("live Deployment has invalid %s request %q: %v", resourceName, live, err)
+		return fmt.Errorf("live workload has invalid %s request %q: %v", resourceName, live, err)
 	}
 	if currentQuantity.Cmp(liveQuantity) != 0 {
-		return fmt.Errorf("configured Helm value %s is %q but the live Deployment %s request is %q; the mapping may be wrong or Fleet is not converged", formatHelmSourcePath(path), current, resourceName, live)
+		return fmt.Errorf("configured Helm value %s is %q but the live workload %s request is %q; the mapping may be wrong or Fleet is not converged", formatHelmSourcePath(path), current, resourceName, live)
 	}
 	return nil
 }

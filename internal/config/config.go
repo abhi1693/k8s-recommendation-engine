@@ -167,8 +167,8 @@ func (p *ApplicationProfile) Validate() error {
 		if workload.Name == "" {
 			return fmt.Errorf("workload name is required")
 		}
-		if workload.TargetRef.Kind != "Deployment" {
-			return fmt.Errorf("workload %s target kind %q is unsupported; only Deployment is implemented", workload.Name, workload.TargetRef.Kind)
+		if !supportedTargetKind(workload.TargetRef.Kind) {
+			return fmt.Errorf("workload %s target kind %q is unsupported; supported kinds are Deployment and StatefulSet", workload.Name, workload.TargetRef.Kind)
 		}
 		if workload.TargetRef.Name == "" {
 			return fmt.Errorf("workload %s targetRef.name is required", workload.Name)
@@ -228,6 +228,15 @@ func (p *ApplicationProfile) Validate() error {
 		}
 	}
 	return nil
+}
+
+func supportedTargetKind(kind string) bool {
+	switch kind {
+	case "Deployment", "StatefulSet":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateHelmValues(workload WorkloadSpec) error {

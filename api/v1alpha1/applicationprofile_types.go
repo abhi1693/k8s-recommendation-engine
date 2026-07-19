@@ -99,7 +99,7 @@ type HelmValuesSpec struct {
 // Each path must point to an existing scalar so a misspelled chart key cannot be silently added.
 // +kubebuilder:validation:MinProperties=1
 type HelmValuePaths struct {
-	// Replicas is the path to the chart value that renders Deployment spec.replicas.
+	// Replicas is the path to the chart value that renders the target workload spec.replicas.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:MinLength=1
 	// +optional
@@ -120,7 +120,7 @@ type TargetRef struct {
 	// +optional
 	// +kubebuilder:default="apps/v1"
 	APIVersion string `json:"apiVersion,omitempty"`
-	// +kubebuilder:validation:Enum=Deployment
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet
 	Kind string `json:"kind"`
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`

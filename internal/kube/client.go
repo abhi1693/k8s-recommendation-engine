@@ -90,6 +90,10 @@ func (c *Client) GetDeployment(ctx context.Context, namespace, name string) (*ap
 	return c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
+func (c *Client) GetStatefulSet(ctx context.Context, namespace, name string) (*appsv1.StatefulSet, error) {
+	return c.clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
 func (c *Client) ListHPAs(ctx context.Context, namespace string) (*autoscalingv2.HorizontalPodAutoscalerList, error) {
 	return c.clientset.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
 }

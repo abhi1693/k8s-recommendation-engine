@@ -1,15 +1,21 @@
 package analyzer
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/abhi1693/k8s-recommendation-engine/internal/config"
+	"github.com/abhi1693/k8s-recommendation-engine/internal/kube"
 	"github.com/abhi1693/k8s-recommendation-engine/internal/prom"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestMetricCondition(t *testing.T) {
@@ -81,6 +87,131 @@ func TestContainerReportIncludesMemoryLimitBytes(t *testing.T) {
 	}
 	if got.MemoryLimitBytes != 512*1024*1024 {
 		t.Fatalf("MemoryLimitBytes = %f", got.MemoryLimitBytes)
+	}
+}
+
+func TestAnalyzeSupportsStatefulSetWorkload(t *testing.T) {
+	labels := map[string]string{
+		"app.kubernetes.io/name":      "valkey",
+		"app.kubernetes.io/component": "node",
+	}
+	replicas := int32(3)
+	zeroUnavailable := intstr.FromInt(0)
+	clientset := fake.NewSimpleClientset(
+		&appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "valkey-node",
+				Namespace: "valkey",
+				Annotations: map[string]string{
+					"objectset.rio.cattle.io/id": "default-valkey",
+					"meta.helm.sh/release-name":  "valkey",
+				},
+				Generation: 7,
+			},
+			Spec: appsv1.StatefulSetSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: labels},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: labels},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{
+							Name: "valkey",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("50m"),
+									corev1.ResourceMemory: resource.MustParse("112Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceMemory: resource.MustParse("176Mi"),
+								},
+							},
+						},
+					}},
+				},
+				UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+					Type: appsv1.RollingUpdateStatefulSetStrategyType,
+					RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
+						MaxUnavailable: &zeroUnavailable,
+					},
+				},
+			},
+			Status: appsv1.StatefulSetStatus{
+				ObservedGeneration: 7,
+				ReadyReplicas:      3,
+				UpdatedReplicas:    3,
+				AvailableReplicas:  3,
+			},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "valkey-node-0", Namespace: "valkey", Labels: labels},
+			Spec:       corev1.PodSpec{NodeName: "node-a"},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		},
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "valkey-headless", Namespace: "valkey"},
+			Spec:       corev1.ServiceSpec{Selector: labels},
+		},
+		&policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Name: "valkey-node", Namespace: "valkey"},
+			Spec: policyv1.PodDisruptionBudgetSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: labels},
+			},
+			Status: policyv1.PodDisruptionBudgetStatus{
+				DisruptionsAllowed: 1,
+				CurrentHealthy:     3,
+				DesiredHealthy:     2,
+				ExpectedPods:       3,
+			},
+		},
+	)
+	profile := &config.ApplicationProfile{
+		Metadata: config.Metadata{Name: "valkey"},
+		Spec: config.ApplicationSpec{
+			Namespace: "valkey",
+			Workloads: []config.WorkloadSpec{
+				{
+					Name:             "node",
+					TargetRef:        config.TargetRef{APIVersion: "apps/v1", Kind: "StatefulSet", Name: "valkey-node"},
+					MetricProfileRef: "resource-only",
+					Scaling:          config.ScalingSpec{CPU: true, Memory: true},
+				},
+			},
+		},
+		MetricProfiles: map[string]config.MetricProfile{
+			"resource-only": {},
+		},
+	}
+
+	report, err := New(kube.NewFakeClient(clientset), nil).Analyze(context.Background(), profile)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if len(report.Workloads) != 1 {
+		t.Fatalf("len(Workloads) = %d, want 1", len(report.Workloads))
+	}
+	workload := report.Workloads[0]
+	if workload.Kind != "StatefulSet" || workload.Deployment != "valkey-node" {
+		t.Fatalf("workload identity = %s/%s, want StatefulSet/valkey-node", workload.Kind, workload.Deployment)
+	}
+	if workload.Replicas != 3 || workload.ReadyReplicas != 3 {
+		t.Fatalf("replicas = %d ready = %d, want 3/3", workload.Replicas, workload.ReadyReplicas)
+	}
+	if !workload.FleetManaged || workload.HelmRelease != "valkey" {
+		t.Fatalf("Fleet/Helm metadata = %t/%q, want true/valkey", workload.FleetManaged, workload.HelmRelease)
+	}
+	if len(workload.Containers) != 1 || workload.Containers[0].MemoryRequest != "112Mi" {
+		t.Fatalf("containers = %#v, want valkey memory request", workload.Containers)
+	}
+	if len(workload.PDBs) != 1 {
+		t.Fatalf("PDBs = %#v, want one matching PDB", workload.PDBs)
+	}
+	if !workload.Rollout.Settled || !workload.Availability.RollingUpdateZeroUnavailable {
+		t.Fatalf("rollout/availability = %#v / %#v, want settled zero-unavailable", workload.Rollout, workload.Availability)
 	}
 }
 

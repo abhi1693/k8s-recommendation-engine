@@ -99,6 +99,15 @@ func TestValidateAcceptsHelmValuePaths(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsStatefulSetTarget(t *testing.T) {
+	profile := validTestProfile()
+	profile.Spec.Workloads[0].TargetRef.Kind = "StatefulSet"
+	profile.Spec.Workloads[0].TargetRef.Name = "valkey-node"
+	if err := profile.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestValidateRejectsInvalidHelmValueMappings(t *testing.T) {
 	tests := []struct {
 		name string

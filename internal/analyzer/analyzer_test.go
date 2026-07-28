@@ -276,7 +276,7 @@ func TestBuildRecommendationUsesConfiguredContainerSelector(t *testing.T) {
 	}
 }
 
-func TestBuildRecommendationIncreasesReplicasOnSaturation(t *testing.T) {
+func TestBuildRecommendationDoesNotIncreaseReplicasOnResourceSaturationAlone(t *testing.T) {
 	report := WorkloadReport{
 		Replicas: 2,
 		Containers: []ContainerReport{
@@ -303,11 +303,60 @@ func TestBuildRecommendationIncreasesReplicasOnSaturation(t *testing.T) {
 	}
 
 	got := buildRecommendation(workload, report, nil)
-	if got.RecommendedReplicas != 4 {
-		t.Fatalf("RecommendedReplicas = %d, want 4", got.RecommendedReplicas)
+	if got.RecommendedReplicas != 2 {
+		t.Fatalf("RecommendedReplicas = %d, want 2", got.RecommendedReplicas)
 	}
-	if got.RecommendedCPURequest != "740m" {
-		t.Fatalf("RecommendedCPURequest = %q, want 740m", got.RecommendedCPURequest)
+	if got.RecommendedCPURequest != "750m" {
+		t.Fatalf("RecommendedCPURequest = %q, want 750m", got.RecommendedCPURequest)
+	}
+	if !contains(got.ReasonCodes, "cpu_replica_scale_up_blocked_without_demand_signal") {
+		t.Fatalf("ReasonCodes missing CPU demand gate: %#v", got.ReasonCodes)
+	}
+	if !contains(got.ReasonCodes, "replica_count_hold") {
+		t.Fatalf("ReasonCodes missing replica hold: %#v", got.ReasonCodes)
+	}
+}
+
+func TestBuildRecommendationHoldsResourceOnlyRunawayReplicaPressure(t *testing.T) {
+	report := WorkloadReport{
+		Replicas:      53,
+		ReadyReplicas: 53,
+		Containers: []ContainerReport{
+			{
+				Name:               "worker",
+				MemoryRequest:      "336Mi",
+				MemoryRequestBytes: 336 * 1024 * 1024,
+			},
+		},
+		MetricsCondition: "healthy",
+		MetricSignals: []SignalReport{
+			sampleSignalWithHistory("memory_working_set", 24*1024*1024*1024, SignalHistory{
+				Points: 72,
+				P50:    20 * 1024 * 1024 * 1024,
+				P95:    24 * 1024 * 1024 * 1024,
+				Max:    25 * 1024 * 1024 * 1024,
+			}),
+		},
+	}
+	workload := config.WorkloadSpec{
+		Scaling: config.ScalingSpec{Replicas: true, Memory: true},
+		Bounds: config.BoundsSpec{
+			Replicas: config.ReplicaBounds{Min: 1, Max: 100},
+		},
+	}
+
+	got := buildRecommendation(workload, report, nil)
+	if got.RecommendedReplicas != 53 {
+		t.Fatalf("RecommendedReplicas = %d, want 53; reasons=%#v", got.RecommendedReplicas, got.ReasonCodes)
+	}
+	if got.RecommendedMemoryRequest == "" || got.RecommendedMemoryRequest == "336Mi" {
+		t.Fatalf("RecommendedMemoryRequest = %q, want memory request increase", got.RecommendedMemoryRequest)
+	}
+	if !contains(got.ReasonCodes, "memory_replica_scale_up_blocked_without_demand_signal") {
+		t.Fatalf("ReasonCodes missing memory demand gate: %#v", got.ReasonCodes)
+	}
+	if contains(got.ReasonCodes, "replica_scale_up_recommended") {
+		t.Fatalf("ReasonCodes included scale-up recommendation: %#v", got.ReasonCodes)
 	}
 }
 

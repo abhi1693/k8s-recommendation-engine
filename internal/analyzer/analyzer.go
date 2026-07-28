@@ -846,7 +846,17 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 		} else if trafficDecision.Replicas > 0 {
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, fmt.Sprintf("traffic_hold_reference:%d", trafficDecision.Replicas))
 		}
-		replicaDecision := multiSignalReplicaDecision(workload, report, sharedSignals, trafficDecision, trafficFloor, cpuDrivenReplicas, memoryDrivenReplicas, cpuPolicy, memoryPolicy, hasCPUDecision, cpuForDecision, hasMemoryDecision, memoryForDecision, pdbFloor, availabilityFloor)
+		resourceScaleUpAllowed := trafficDecision.ScaleUpAllowed || recommendation.AvailabilityRecovery
+		if !resourceScaleUpAllowed {
+			currentReplicas := maxInt32(report.Replicas, 1)
+			if cpuDrivenReplicas > currentReplicas {
+				recommendation.ReasonCodes = append(recommendation.ReasonCodes, "cpu_replica_scale_up_blocked_without_demand_signal")
+			}
+			if memoryDrivenReplicas > currentReplicas {
+				recommendation.ReasonCodes = append(recommendation.ReasonCodes, "memory_replica_scale_up_blocked_without_demand_signal")
+			}
+		}
+		replicaDecision := multiSignalReplicaDecision(workload, report, sharedSignals, trafficDecision, trafficFloor, cpuDrivenReplicas, memoryDrivenReplicas, resourceScaleUpAllowed, cpuPolicy, memoryPolicy, hasCPUDecision, cpuForDecision, hasMemoryDecision, memoryForDecision, pdbFloor, availabilityFloor)
 		recommendation.ReplicaDecision = &replicaDecision
 		recommendation.ReasonCodes = append(recommendation.ReasonCodes, replicaDecisionReason(replicaDecision)...)
 		rawReplicas := replicaDecision.RecommendedReplicas
@@ -856,7 +866,10 @@ func buildRecommendation(workload config.WorkloadSpec, report WorkloadReport, sh
 			recommendation.ReasonCodes = append(recommendation.ReasonCodes, "replica_recommendation_clamped_to_max")
 		}
 		if !recommendation.AvailabilityRecovery {
-			capacityCeiling := maxInt32(rawReplicas, trafficDecision.Replicas, cpuDrivenReplicas, memoryDrivenReplicas, report.Replicas)
+			capacityCeiling := maxInt32(rawReplicas, trafficDecision.Replicas, report.Replicas)
+			if resourceScaleUpAllowed {
+				capacityCeiling = maxInt32(capacityCeiling, cpuDrivenReplicas, memoryDrivenReplicas)
+			}
 			if plan, ok := optimizeReplicaResourcePlan(workload, report, container, rawReplicas, capacityCeiling, cpuPolicy, memoryPolicy, hasCPUDecision, cpuForDecision, resourceDownscaleAllowed(report.MetricSignals, "cpu_usage"), hasMemoryDecision, memoryForDecision, resourceDownscaleAllowed(report.MetricSignals, "memory_working_set")); ok {
 				rawReplicas = plan.Replicas
 				if workload.Scaling.CPU && plan.CPURequest != "" {
@@ -1408,7 +1421,7 @@ type trafficDecision struct {
 	ScaleUpAllowed        bool
 }
 
-func multiSignalReplicaDecision(workload config.WorkloadSpec, report WorkloadReport, sharedSignals []SignalReport, traffic trafficDecision, trafficFloor, cpuReplicas, memoryReplicas int32, cpuPolicy, memoryPolicy resourcePolicy, hasCPU bool, cpuDemand float64, hasMemory bool, memoryDemand float64, pdbFloor, availabilityFloor int32) ReplicaDecision {
+func multiSignalReplicaDecision(workload config.WorkloadSpec, report WorkloadReport, sharedSignals []SignalReport, traffic trafficDecision, trafficFloor, cpuReplicas, memoryReplicas int32, resourceScaleUpAllowed bool, cpuPolicy, memoryPolicy resourcePolicy, hasCPU bool, cpuDemand float64, hasMemory bool, memoryDemand float64, pdbFloor, availabilityFloor int32) ReplicaDecision {
 	current := maxInt32(report.Replicas, 1)
 	configFloor := int32(workload.Bounds.Replicas.Min)
 	floor := maxInt32(configFloor, pdbFloor, availabilityFloor, 1)
@@ -1439,10 +1452,10 @@ func multiSignalReplicaDecision(workload config.WorkloadSpec, report WorkloadRep
 	if component, ok := anomalyReplicaComponent(sharedSignals, "concurrent_requests", "concurrent_requests", current); ok {
 		decision.Components = append(decision.Components, component)
 	}
-	if component, ok := resourceReplicaComponent("cpu", cpuReplicas, current, hasCPU, cpuDemand, cpuPolicy.TargetUtilization); ok {
+	if component, ok := resourceReplicaComponent("cpu", cpuReplicas, current, hasCPU, cpuDemand, cpuPolicy.TargetUtilization, resourceScaleUpAllowed); ok {
 		decision.Components = append(decision.Components, component)
 	}
-	if component, ok := resourceReplicaComponent("memory", memoryReplicas, current, hasMemory, memoryDemand, memoryPolicy.TargetUtilization); ok {
+	if component, ok := resourceReplicaComponent("memory", memoryReplicas, current, hasMemory, memoryDemand, memoryPolicy.TargetUtilization, resourceScaleUpAllowed); ok {
 		decision.Components = append(decision.Components, component)
 	}
 	if trafficFloor > 0 {
@@ -1548,16 +1561,21 @@ func anomalyReplicaComponent(signals []SignalReport, signalName, componentName s
 	return ReplicaDecisionComponent{}, false
 }
 
-func resourceReplicaComponent(name string, replicas, current int32, hasDemand bool, demand, targetUtilization float64) (ReplicaDecisionComponent, bool) {
+func resourceReplicaComponent(name string, replicas, current int32, hasDemand bool, demand, targetUtilization float64, scaleUpAllowed bool) (ReplicaDecisionComponent, bool) {
 	if !hasDemand || replicas <= 0 {
 		return ReplicaDecisionComponent{}, false
 	}
 	score := 0.0
 	influence := "hold"
+	basis := "learned_p95_target"
+	componentReplicas := replicas
 	switch {
-	case replicas > current:
+	case replicas > current && scaleUpAllowed:
 		score = 0.30
 		influence = "pressure"
+	case replicas > current:
+		basis = "learned_p95_target_without_demand_signal"
+		componentReplicas = current
 	case replicas < current:
 		score = -0.10
 		influence = "waste"
@@ -1565,9 +1583,9 @@ func resourceReplicaComponent(name string, replicas, current int32, hasDemand bo
 	return ReplicaDecisionComponent{
 		Name:      name + "_pressure",
 		Score:     score,
-		Replicas:  replicas,
-		Basis:     "learned_p95_target",
-		Observed:  fmt.Sprintf("demand=%.4g target_utilization=%.2f", demand, targetUtilization),
+		Replicas:  componentReplicas,
+		Basis:     basis,
+		Observed:  fmt.Sprintf("demand=%.4g target_utilization=%.2f raw_replicas=%d", demand, targetUtilization, replicas),
 		Influence: influence,
 	}, true
 }

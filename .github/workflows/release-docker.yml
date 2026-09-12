@@ -14,7 +14,7 @@ permissions:
 jobs:
   docker:
     name: Build and publish GHCR image
-    uses: abhi1693/actions/.github/workflows/docker-build-push.yml@master
+    uses: abhi1693/actions/.github/workflows/docker-build-push.yml@34e92ba1eee6a47e9b10f13e2180114fc01b6027
     with:
       image: ghcr.io/abhi1693/k8s-recommendation-engine
       context: .

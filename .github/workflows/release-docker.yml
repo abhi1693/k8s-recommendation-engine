@@ -14,18 +14,18 @@ permissions:
 jobs:
   docker:
     name: Build and publish GHCR image
-    uses: abhi1693/actions/.github/workflows/docker-build-push.yml@master
+    uses: abhi1693/actions/.github/workflows/docker-build-push.yml@v1
     with:
+      push: true
+      matrix: '[{"runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]'
       image: ghcr.io/abhi1693/k8s-recommendation-engine
       context: .
       file: Dockerfile
-      platforms: linux/arm64
       cache-scope: k8s-recommendation-engine
       tags: |
         type=semver,pattern={{version}}
         type=semver,pattern={{major}}.{{minor}}
         type=semver,pattern={{major}}
-        type=ref,event=tag
         type=raw,value=latest
         type=sha,prefix=sha-
     secrets:

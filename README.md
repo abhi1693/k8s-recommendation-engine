@@ -429,7 +429,8 @@ The controller internals are generic: Shipyard is represented by configuration, 
 ## Next patch release
 
 Version 0.3.6 refreshes the Go dependency graph and requires Go 1.27 or newer.
-The image builds with Go 1.27.3. See [CHANGELOG.md](CHANGELOG.md) for the
+The image builds with Go 1.27.3; builder and Debian runtime sources are pinned
+to verified multi-platform digests. See [CHANGELOG.md](CHANGELOG.md) for the
 kube-openapi compatibility constraint. The integration suite continues to use
 a disposable Kubernetes 1.35 API server to verify the supported server line.
 Pull requests run static checks, tests, code-generation freshness checks, and

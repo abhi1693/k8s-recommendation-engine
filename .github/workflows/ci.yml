@@ -38,3 +38,5 @@ jobs:
           go build ./cmd/k8s-recommendation-engine
       - name: Disposable API-server integration test
         run: make test-integration
+      - name: Audit reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

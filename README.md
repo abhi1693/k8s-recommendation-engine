@@ -425,3 +425,11 @@ go run ./cmd/k8s-recommendation-engine analyze --output json
 - `shipyardhq/shipyardhq-worker`
 
 The controller internals are generic: Shipyard is represented by configuration, not hardcoded control flow.
+
+## Next patch release
+
+Version 0.3.6 refreshes the Go dependency graph and requires Go 1.27 or newer.
+The image builds with Go 1.27.3. See [CHANGELOG.md](CHANGELOG.md) for the
+kube-openapi compatibility constraint. The integration suite continues to use
+a disposable Kubernetes 1.35 API server to verify the supported server line.
+Pull requests run static checks, tests, and code-generation freshness checks.

@@ -23,6 +23,9 @@ import (
 	"github.com/abhi1693/k8s-recommendation-engine/internal/state"
 )
 
+// Release builds inject the independently versioned image identity.
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("command failed", "error", err)
@@ -36,6 +39,9 @@ func run() error {
 	}
 
 	switch os.Args[1] {
+	case "version", "--version":
+		fmt.Println(version)
+		return nil
 	case "analyze":
 		return runAnalyze(os.Args[2:])
 	case "run":

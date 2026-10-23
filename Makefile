@@ -1,5 +1,6 @@
 IMG ?= ghcr.io/abhi1693/k8s-recommendation-engine:latest
 CONTAINER_TOOL ?= docker
+VERSION ?= $(shell python3 -c 'import json; print(json.load(open("release.json"))["version"])')
 
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
@@ -50,11 +51,13 @@ run: manifests generate fmt vet
 
 .PHONY: docker-build
 docker-build:
-	$(CONTAINER_TOOL) build -t $(IMG) .
+	$(CONTAINER_TOOL) build --build-arg APP_VERSION=$(VERSION) -t $(IMG) .
 
 .PHONY: docker-push
 docker-push:
-	$(CONTAINER_TOOL) push $(IMG)
+	@echo 'Direct publication is disabled; use the validated release workflow:' >&2
+	@echo 'gh workflow run release-docker.yml --repo abhi1693/k8s-recommendation-engine --ref <validated-release-tag> -f version=<release.json-version>' >&2
+	@exit 1
 
 .PHONY: install
 install: manifests kustomize

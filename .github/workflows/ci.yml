@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 20
     env:
       CGO_ENABLED: "0"
+      GOTOOLCHAIN: local
       GOMAXPROCS: "4"
       KUBECONFIG: /dev/null
     steps:
@@ -40,3 +41,22 @@ jobs:
         run: make test-integration
       - name: Audit reachable Go vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Check release identity guard
+        run: python3 scripts/ci/test-release-identity.py
+  images:
+    needs: verify
+    uses: abhi1693/actions/.github/workflows/container-images.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      manifest: .github/images.json
+      version-file: release.json
+      publish: false
+      amd64-runner: ubuntu-24.04
+      arm64-runner: ubuntu-24.04-arm
+      changed-only: false
+      scan: true
+      scan-ignore-unfixed: false

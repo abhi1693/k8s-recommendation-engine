@@ -1,0 +1,62 @@
+---
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
+      GOTOOLCHAIN: local
+      GOMAXPROCS: "4"
+      KUBECONFIG: /dev/null
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+      - name: Verify dependency checksums
+        run: go mod verify
+      - name: Regenerate manifests and verify freshness
+        run: |
+          make manifests generate
+          git diff --exit-code -- api config
+      - name: Static checks, unit tests, and build
+        run: |
+          test -z "$(gofmt -l api cmd internal)"
+          go vet ./...
+          go test -p 2 ./...
+          go build ./cmd/k8s-recommendation-engine
+      - name: Disposable API-server integration test
+        run: make test-integration
+      - name: Audit reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Check release identity guard
+        run: python3 scripts/ci/test-release-identity.py
+  images:
+    needs: verify
+    uses: abhi1693/actions/.github/workflows/container-images.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      manifest: .github/images.json
+      version-file: release.json
+      publish: false
+      amd64-runner: ubuntu-24.04
+      arm64-runner: ubuntu-24.04-arm
+      changed-only: false
+      scan: true
+      scan-ignore-unfixed: false

@@ -1,5 +1,6 @@
 IMG ?= ghcr.io/abhi1693/k8s-recommendation-engine:latest
 CONTAINER_TOOL ?= docker
+VERSION ?= $(shell python3 -c 'import json; print(json.load(open("release.json"))["version"])')
 
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
@@ -8,9 +9,9 @@ LOCALBIN ?= $(shell pwd)/bin
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 ENVTEST ?= $(LOCALBIN)/setup-envtest
-CONTROLLER_TOOLS_VERSION ?= v0.20.1
-KUSTOMIZE_VERSION ?= v5.8.1
-ENVTEST_VERSION ?= release-0.23
+CONTROLLER_TOOLS_VERSION ?= v0.23.0
+KUSTOMIZE_VERSION ?= v5.8.3
+ENVTEST_VERSION ?= v0.25.2
 ENVTEST_K8S_VERSION ?= 1.35
 
 .PHONY: all
@@ -50,11 +51,13 @@ run: manifests generate fmt vet
 
 .PHONY: docker-build
 docker-build:
-	$(CONTAINER_TOOL) build -t $(IMG) .
+	$(CONTAINER_TOOL) build --build-arg APP_VERSION=$(VERSION) -t $(IMG) .
 
 .PHONY: docker-push
 docker-push:
-	$(CONTAINER_TOOL) push $(IMG)
+	@echo 'Direct publication is disabled; use the validated release workflow:' >&2
+	@echo 'gh workflow run release-docker.yml --repo abhi1693/k8s-recommendation-engine --ref <validated-release-tag> -f version=<release.json-version>' >&2
+	@exit 1
 
 .PHONY: install
 install: manifests kustomize

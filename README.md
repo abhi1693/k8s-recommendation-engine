@@ -425,3 +425,63 @@ go run ./cmd/k8s-recommendation-engine analyze --output json
 - `shipyardhq/shipyardhq-worker`
 
 The controller internals are generic: Shipyard is represented by configuration, not hardcoded control flow.
+
+## Next patch release
+
+Version 0.3.6 refreshes the Go dependency graph and requires Go 1.27 or newer.
+The image builds a static, CGO-disabled binary with Go 1.27.3. The builder and
+Alpine 3.24 runtime are pinned to verified multi-platform digests; the runtime
+retains Git, its HTTPS/credential helpers, and the system CA bundle, with UID/GID
+65532 and the same writable home path. See [CHANGELOG.md](CHANGELOG.md) for the
+kube-openapi compatibility constraint. The integration suite continues to use
+a disposable Kubernetes 1.35 API server to verify the supported server line.
+Pull requests run static checks, tests, code-generation freshness checks, and
+reachable-vulnerability scans with govulncheck.
+
+## Image validation and publication
+
+[`release.json`](release.json) is the source version authority. The image embeds
+that version in the binary (`k8s-recommendation-engine version`) and OCI metadata.
+Pull requests build native Linux/AMD64 and Linux/ARM64 candidates through the same
+shared `container-images.yml@v1` workflow used for releases, with publication
+disabled. Both native images must pass SBOM generation, HIGH/CRITICAL vulnerability
+and secret scanning, including unfixed findings, and the actual runtime smoke.
+
+The smoke uses an internal Docker network with no external egress or published
+ports. Disposable HTTPS Kubernetes/Prometheus and Git fixtures exercise the actual
+binary's dry-run analysis, SQLite persistence, required Git HTTPS and credential
+helpers, and local-only commit/push round-tripping. The unmodified trust store must
+reject the synthetic certificate in both Git and Go; a separate fixture-only CA
+bundle then enables verified requests. No TLS verification bypass, production
+kubeconfig, credential, repository, or cluster is used. Containers, private fixture
+keys, network and state are removed on either success or failure. This complements
+the existing disposable API-server integration test; it does not prove production
+proposal, Pod recovery, or Fleet convergence.
+
+Run the checks against a locally built native image:
+
+```bash
+make docker-build IMG=k8s-recommendation-engine:local
+bash scripts/ci/smoke-image.sh k8s-recommendation-engine:local linux/amd64 0.3.6
+```
+
+Use `linux/arm64` on an ARM64 host. Docker, Python 3, Git and OpenSSL are required
+by the host-side fixture. The final application image does not include Python.
+
+Publication requires the immutable release tag, requested version, `release.json`
+and exact checked-out source commit to agree. A published GitHub release triggers
+the approved workflow, or dispatch that workflow against the validated tag:
+
+```bash
+gh workflow run release-docker.yml --repo abhi1693/k8s-recommendation-engine --ref v0.3.6 -f version=0.3.6
+```
+
+Signed GitHub attestations remain required for this public repository, alongside
+BuildKit provenance, SBOM, strict scans and native smoke, before final promotion.
+Version, major, minor and stable `latest` tags remain supported. SHA-bearing
+candidate tags and OCI source/revision labels preserve the source identity.
+`make docker-push` fails closed instead of bypassing these gates; local builds
+remain available. Release publication and later GitOps deployment are separate
+operations. A home-lab deployment must update its Git checkout init and controller
+image together, preserve the SQLite PVC and home/Git volumes, and verify profile
+and Fleet status after readiness.
